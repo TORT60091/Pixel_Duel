@@ -911,7 +911,7 @@ function mpSendState() {
           lives:enemy.lives,  ammo:enemy.ammo,  reloading:enemy.reloading, reloadTimer:enemy.reloadTimer,
           hasHat:enemy.hasHat, dead:enemy.dead, deadAngle:enemy.deadAngle, invincible:enemy.invincible,
           moving:enemy.moving, walkFrame:enemy.walkFrame },
-    bullets: bullets.map(b=>({x:b.x,y:b.y,dx:b.dx,dy:b.dy,owner:b.owner})),
+    bullets: bullets.map(b=>({x:b.x,y:b.y,dx:b.dx,dy:b.dy,owner:b.owner,trail:b.trail.slice(-12)})),
     flyingHats: flyingHats.map(h=>({x:h.x,y:h.y,dx:h.dx,dy:h.dy,spin:h.spin})),
     flyingGuns: flyingGuns.map(g=>({x:g.x,y:g.y,spin:g.spin})),
     go: gameOver, ts: timeScale, se: slowEnergy
@@ -932,10 +932,12 @@ function mpApplyState(s) {
   timeScale = s.ts
   slowEnergy = s.se
 
-  // Sync bullets — rebuild array
+  // Sync bullets — rebuild array preserving trails
   bullets = s.bullets.map(b => {
     let bl = new Bullet(b.x, b.y, 0, b.owner)
-    bl.dx = b.dx; bl.dy = b.dy; return bl
+    bl.dx = b.dx; bl.dy = b.dy
+    bl.trail = b.trail || []
+    return bl
   })
 }
 
@@ -966,7 +968,7 @@ function mpNotifyLevelStart(level) {
     mp.ws.send(JSON.stringify({ type: 'start_level', level }))
     // Begin sending state snapshots
     if (mp.stateInterval) clearInterval(mp.stateInterval)
-    mp.stateInterval = setInterval(mpSendState, 50)  // 20fps
+    mp.stateInterval = setInterval(mpSendState, 33)  // 30fps
   }
 }
 
@@ -1251,7 +1253,24 @@ function loop(now){
   if(currentLevel===3){ for(let a of aliens){a.update(dt);a.draw()} }
 
   if (mp.connected && mp.role === 'guest') {
-    // Guest: physics already applied via mpApplyState, just render
+    // Guest: run local prediction for own character (enemy on guest side) to reduce perceived lag
+    if (enemy && !enemy.dead) {
+      enemy.moving = false
+      if (keys['KeyA']||keys['ArrowLeft'])  { enemy.x -= 4*dt*timeScale; enemy.moving = true; enemy.facing = -1 }
+      if (keys['KeyD']||keys['ArrowRight']) { enemy.x += 4*dt*timeScale; enemy.moving = true; enemy.facing = 1 }
+      if ((keys['Space']||keys['ArrowUp']) && enemy.onGround) { enemy.vy = -13; enemy.onGround = false }
+      if (enemy.moving){ enemy.walkTimer+=dt*timeScale; enemy.walkFrame=enemy.walkTimer*0.2 }
+      enemy.vy+=0.65*dt*timeScale; enemy.y+=enemy.vy*dt*timeScale
+      if(enemy.y>=SPRITE_GROUND){enemy.y=SPRITE_GROUND;enemy.vy=0;enemy.onGround=true}
+      enemy.x=Math.max(0,Math.min(W-enemy.w,enemy.x))
+    }
+    // also update bullets locally for smooth rendering
+    for(let b of bullets) b.update(dt)
+    // update particles/hats/guns visually
+    for(let p of particles) p.update(dt)
+    particles = particles.filter(p=>p.life>0)
+    for(let h of flyingHats) h.update(dt)
+    for(let g of flyingGuns) g.update(dt)
   } else {
     // Host (or single player): run full physics
     // MP host: apply guest inputs to enemy instead of AI
@@ -1323,10 +1342,18 @@ function loop(now){
   })
   } // end host-only physics block
 
-  particles=particles.filter(p=>{p.update(dt);p.draw();return p.life>0})
-  flashes  =flashes  .filter(f=>{f.update(dt);f.draw();return f.life>0})
-  flyingHats.forEach(h=>{h.update(dt);h.draw()})
-  flyingGuns.forEach(g=>{g.update(dt);g.draw()})
+  if (mp.connected && mp.role === 'guest') {
+    // already updated in prediction block above — just draw
+    particles = particles.filter(p=>{p.draw();return p.life>0})
+    flashes   = flashes  .filter(f=>{f.update(dt);f.draw();return f.life>0})
+    flyingHats.forEach(h=>h.draw())
+    flyingGuns.forEach(g=>g.draw())
+  } else {
+    particles=particles.filter(p=>{p.update(dt);p.draw();return p.life>0})
+    flashes  =flashes  .filter(f=>{f.update(dt);f.draw();return f.life>0})
+    flyingHats.forEach(h=>{h.update(dt);h.draw()})
+    flyingGuns.forEach(g=>{g.update(dt);g.draw()})
+  }
   // ragdoll physics — only on host (guest gets position from state)
   if(!(mp.connected && mp.role==='guest')){
     if(player&&player.dead) player.updateRagdoll(dt)
