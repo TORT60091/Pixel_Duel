@@ -90,7 +90,7 @@ canvas { display:block; }
 <!-- GAME OVER UI -->
 <div id="ui">
   <div id="result">VICTORY</div>
-  <button class="ui-btn" onclick="location.reload()">MENU</button>
+  <button class="ui-btn" id="menu-btn" onclick="location.reload()">MENU</button>
   <button class="ui-btn" id="retry-btn" onclick="restartLevel()">RETRY</button>
 </div>
 
@@ -896,6 +896,7 @@ function mpConnect() {
         gameOver = true
         resultEl.textContent = msg.result
         document.getElementById('retry-btn').style.display = 'none'
+        document.getElementById('menu-btn').style.display = 'none'
         ui.style.display = 'block'
       }
     }
@@ -904,6 +905,7 @@ function mpConnect() {
       if (mp.role === 'guest') {
         ui.style.display = 'none'
         document.getElementById('retry-btn').style.display = ''
+        document.getElementById('menu-btn').style.display = ''
         mp.currentSeed = msg.seed || mp.currentSeed
         startGame(msg.level, true)
       }
@@ -935,12 +937,16 @@ function mpSendState() {
     p:  { x:player.x, y:player.y, vy:player.vy, angle:player.angle, facing:player.facing,
           lives:player.lives, ammo:player.ammo, reloading:player.reloading, reloadTimer:player.reloadTimer,
           hasHat:player.hasHat, dead:player.dead, deadAngle:player.deadAngle, invincible:player.invincible,
-          moving:player.moving, walkFrame:player.walkFrame },
+          moving:player.moving, walkFrame:player.walkFrame,
+          deadVy:player.deadVy, deadBounced:player.deadBounced, deadDriftX:player.deadDriftX, deadTargetAngle:player.deadTargetAngle,
+          hairStyle:player.hairStyle, P:player.P },
     e:  { x:enemy.x,  y:enemy.y,  vy:enemy.vy,  angle:enemy.angle,  facing:enemy.facing,
           lives:enemy.lives,  ammo:enemy.ammo,  reloading:enemy.reloading, reloadTimer:enemy.reloadTimer,
           hasHat:enemy.hasHat, dead:enemy.dead, deadAngle:enemy.deadAngle, invincible:enemy.invincible,
-          moving:enemy.moving, walkFrame:enemy.walkFrame },
-    bullets: bullets.map(b=>({x:b.x,y:b.y,dx:b.dx,dy:b.dy,owner:b.owner,trail:b.trail.slice(-12)})),
+          moving:enemy.moving, walkFrame:enemy.walkFrame,
+          deadVy:enemy.deadVy, deadBounced:enemy.deadBounced, deadDriftX:enemy.deadDriftX, deadTargetAngle:enemy.deadTargetAngle,
+          hairStyle:enemy.hairStyle, P:enemy.P },
+    bullets: bullets.map(b=>({x:b.x,y:b.y,dx:b.dx,dy:b.dy,owner:b.owner,trail:b.trail.slice()})),
     flyingHats: flyingHats.map(h=>({x:h.x,y:h.y,dx:h.dx,dy:h.dy,spin:h.spin})),
     flyingGuns: flyingGuns.map(g=>({x:g.x,y:g.y,spin:g.spin})),
     go: gameOver, ts: timeScale, se: slowEnergy
