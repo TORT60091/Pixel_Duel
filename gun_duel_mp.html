@@ -1268,9 +1268,11 @@ function loop(now){
       // mirror guest key inputs for movement
       let gk = mp.guestKeys
       enemy.moving = false
-      if (gk['KeyA']||gk['ArrowLeft'])  { enemy.x -= 4*dt*timeScale; enemy.moving = true }
-      if (gk['KeyD']||gk['ArrowRight']) { enemy.x += 4*dt*timeScale; enemy.moving = true }
-      if ((gk['Space']||gk['ArrowUp']) && enemy.onGround) { enemy.vy = -13; enemy.onGround = false }
+      if (!enemy.dead) {
+        if (gk['KeyA']||gk['ArrowLeft'])  { enemy.x -= 4*dt*timeScale; enemy.moving = true }
+        if (gk['KeyD']||gk['ArrowRight']) { enemy.x += 4*dt*timeScale; enemy.moving = true }
+        if ((gk['Space']||gk['ArrowUp']) && enemy.onGround) { enemy.vy = -13; enemy.onGround = false }
+      }
       if (enemy.moving){ enemy.walkTimer+=dt*timeScale; enemy.walkFrame=enemy.walkTimer*0.2 }
       enemy.vy+=0.65*dt*timeScale; enemy.y+=enemy.vy*dt*timeScale
       if(enemy.y>=SPRITE_GROUND){enemy.y=SPRITE_GROUND;enemy.vy=0;enemy.onGround=true}
