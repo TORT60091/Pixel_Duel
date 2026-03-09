@@ -1339,22 +1339,21 @@ function loop(now){
     if (mp.connected && mp.role === 'host' && enemy) {
       enemy.angle  = mp.guestAngle
       enemy.facing = mp.guestFacing
-      // mirror guest key inputs for movement
-      let gk = mp.guestKeys
-      enemy.moving = false
       if (!enemy.dead) {
+        // mirror guest key inputs for movement
+        let gk = mp.guestKeys
+        enemy.moving = false
         if (gk['KeyA']||gk['ArrowLeft'])  { enemy.x -= 4*dt*timeScale; enemy.moving = true }
         if (gk['KeyD']||gk['ArrowRight']) { enemy.x += 4*dt*timeScale; enemy.moving = true }
         if ((gk['Space']||gk['ArrowUp']) && enemy.onGround) { enemy.vy = -13; enemy.onGround = false }
+        if (enemy.moving){ enemy.walkTimer+=dt*timeScale; enemy.walkFrame=enemy.walkTimer*0.2 }
+        enemy.vy+=0.65*dt*timeScale; enemy.y+=enemy.vy*dt*timeScale
+        if(enemy.y>=SPRITE_GROUND){enemy.y=SPRITE_GROUND;enemy.vy=0;enemy.onGround=true}
+        enemy.x=Math.max(0,Math.min(W-enemy.w,enemy.x))
+        if(enemy.invincible>0) enemy.invincible-=dt*timeScale
+        if(enemy.reloading){enemy.reloadTimer-=dt;if(enemy.reloadTimer<=0){enemy.ammo=enemy.maxAmmo;enemy.reloading=false}}
+        if(enemy.ammo<=0&&!enemy.reloading){enemy.reloading=true;enemy.reloadTimer=60}
       }
-      if (enemy.moving){ enemy.walkTimer+=dt*timeScale; enemy.walkFrame=enemy.walkTimer*0.2 }
-      enemy.vy+=0.65*dt*timeScale; enemy.y+=enemy.vy*dt*timeScale
-      if(enemy.y>=SPRITE_GROUND){enemy.y=SPRITE_GROUND;enemy.vy=0;enemy.onGround=true}
-      enemy.x=Math.max(0,Math.min(W-enemy.w,enemy.x))
-      if(enemy.invincible>0) enemy.invincible-=dt*timeScale
-      if(enemy.reloading){enemy.reloadTimer-=dt;if(enemy.reloadTimer<=0){enemy.ammo=enemy.maxAmmo;enemy.reloading=false}}
-      if(enemy.ammo<=0&&!enemy.reloading){enemy.reloading=true;enemy.reloadTimer=60}
-    } else {
       // single player: normal update + AI
       if(!enemy.dead) enemy.update(dt)
       if(!gameOver && !enemy.dead) enemy.updateAI(dt,player)
