@@ -924,10 +924,22 @@ function mpApplyState(s) {
   // Apply host's player state fully
   Object.assign(player, s.p)
   // Apply enemy state but preserve local angle/facing — guest controls these directly
+  // Smoothly lerp position instead of snapping to avoid jitter
   let localAngle = enemy.angle, localFacing = enemy.facing
+  let localX = enemy.x, localY = enemy.y, localVy = enemy.vy
   Object.assign(enemy, s.e)
   enemy.angle = localAngle
   enemy.facing = localFacing
+  // Lerp position: blend server correction gently (0.3 = 30% snap per frame)
+  let dx = enemy.x - localX, dy = enemy.y - localY
+  let dist = Math.sqrt(dx*dx + dy*dy)
+  if (dist < 80) {
+    // small error — lerp smoothly
+    enemy.x = localX + dx * 0.3
+    enemy.y = localY + dy * 0.3
+    enemy.vy = localVy + (enemy.vy - localVy) * 0.3
+  }
+  // large error (>80px) — snap immediately (teleport/death etc)
   gameOver = s.go
   timeScale = s.ts
   slowEnergy = s.se
