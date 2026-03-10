@@ -281,7 +281,7 @@ class Flash{
 }
 
 // ── BLOOD ─────────────────────────────────────────────────────
-let bloodStains=[], bloodDrops=[]
+let bloodStains=[], bloodDrops=[], bloodZones=[]
 
 class BloodDrop{
   constructor(x,y,dirX){
@@ -297,7 +297,8 @@ class BloodDrop{
     this.dy+=0.55*dt*timeScale
     this.x+=this.dx*dt*timeScale
     this.y+=this.dy*dt*timeScale
-    for(let o of obstacles){
+    let zones=[...obstacles,...bloodZones]
+    for(let o of zones){
       if(this.x>=o.x&&this.x<=o.x+o.w&&this.y>=o.y&&this.y<=o.y+o.h){
         this.settled=true
         bloodStains.push({type:'obstacle',obs:o,rx:this.x-o.x,ry:this.y-o.y,size:this.size*1.4,alpha:0.6+Math.random()*0.4})
@@ -986,6 +987,12 @@ function mpConnect(serverUrl) {
       }
     }
 
+    if (msg.type === 'hit_event') {
+      if (mp.role === 'guest') {
+        spawnBloodDrops(msg.cx, msg.cy, msg.bulletDx, msg.dropCount)
+      }
+    }
+
     if (msg.type === 'restart') {
       if (mp.role === 'guest') {
         ui.style.display = 'none'
@@ -1079,12 +1086,17 @@ function mpApplyState(s) {
   gameOver = s.go
   timeScale = s.ts
   slowEnergy = s.se
+  isSlowmo = timeScale < 1  // derive from timeScale so guest slowmo matches host
 
-  // Sync bullets
+  // Sync bullets — preserve pathTrail by matching owner+dx+dy
+  let prevBullets = bullets
   bullets = s.bullets.map(b => {
     let bl = new Bullet(b.x, b.y, 0, b.owner)
     bl.dx = b.dx; bl.dy = b.dy
     bl.trail = b.trail || []
+    // try to carry over pathTrail from matching previous bullet
+    let prev = prevBullets.find(p => p.owner===b.owner && Math.abs(p.dx-b.dx)<0.01 && Math.abs(p.dy-b.dy)<0.01)
+    if (prev) { bl.pathTrail=prev.pathTrail; bl._pathD=prev._pathD; bl._sinceLastPt=prev._sinceLastPt }
     return bl
   })
 
@@ -1426,9 +1438,13 @@ function takeHit(p,isPlayer,bulletDx){
     bp.dx += -bulletDx*(0.5+Math.random()*3)
     particles.push(bp)
   }
-  // blood drops settling on surfaces
+  // spawn blood drops locally
   let dropCount=p.lives<=0?22:12
-  for(let i=0;i<dropCount;i++) bloodDrops.push(new BloodDrop(cx,cy,bulletDx>0?1:-1))
+  spawnBloodDrops(cx,cy,bulletDx,dropCount)
+  // tell guest to spawn blood drops too
+  if(mp.connected && mp.role==='host' && mp.ws?.readyState===1){
+    mp.ws.send(JSON.stringify({type:'hit_event',cx,cy,bulletDx,dropCount}))
+  }
   if(p.lives<=0){
     p.dead=true
     p.deadVy=-6
@@ -1442,6 +1458,10 @@ function takeHit(p,isPlayer,bulletDx){
   }
 }
 
+function spawnBloodDrops(cx,cy,bulletDx,dropCount){
+  for(let i=0;i<dropCount;i++) bloodDrops.push(new BloodDrop(cx,cy,bulletDx>0?1:-1))
+}
+
 // ── MAIN LOOP ────────────────────────────────────────────────
 let lastTime=performance.now()
 let glowT=0
@@ -1450,7 +1470,14 @@ function loop(now){
   let dt=Math.min((now-lastTime)/16.67,3); lastTime=now
   glowT+=dt*0.05
 
-  updateSlowmo(dt)
+  // Guest gets timeScale/isSlowmo from host snapshot; only host/SP runs updateSlowmo
+  if (!mp.connected || mp.role !== 'guest') updateSlowmo(dt)
+  // always update glow alpha so matrix trail fades smoothly on guest too
+  else {
+    let target=isSlowmo?1:0
+    slowmoGlowAlpha+=(target-slowmoGlowAlpha)*0.08*dt
+    if(slowmoGlowAlpha<0.005) slowmoGlowAlpha=0
+  }
 
   // draw bg per level
   if(currentLevel===1) drawWildWest()
@@ -1590,7 +1617,7 @@ function loop(now){
 function startGame(level, isRetry=false, skipNetSync=false){
   currentLevel=level
   levelSel.style.display='none'
-  bullets=[];particles=[];flashes=[];obstacles=[];clouds=[];aliens=[];flyingHats=[];flyingGuns=[];bloodDrops=[];bloodStains=[]
+  bullets=[];particles=[];flashes=[];obstacles=[];clouds=[];aliens=[];flyingHats=[];flyingGuns=[];bloodDrops=[];bloodStains=[];bloodZones=[]
   _lastParticleCount = 0
   timeScale=1;slowEnergy=1;isSlowmo=false;gameOver=false;slowmoGlowAlpha=0
 
@@ -1618,6 +1645,10 @@ function startGame(level, isRetry=false, skipNetSync=false){
       new Cloud(300, 280, 65,  32, 0.22),
       new Cloud(900, 260, 95,  42, 0.12),
     ]
+    // cactus blood zones — trunk column
+    for(let [cx,P] of [[W*0.22,12],[W*0.50,18],[W*0.78,15]]){
+      bloodZones.push({x:cx-1.5*P, y:GROUND-10*P, w:3*P, h:10*P})
+    }
   }
 
   if(level===2){
@@ -1625,6 +1656,8 @@ function startGame(level, isRetry=false, skipNetSync=false){
     for(let lx of posts){
       obstacles.push({x:lx-4,y:GROUND-180,w:54,h:8})
       obstacles.push({x:lx+44,y:GROUND-192,w:16,h:18})
+      // vertical pole blood zone
+      bloodZones.push({x:lx-4, y:GROUND-180, w:8, h:180})
     }
   }
 
@@ -1634,6 +1667,8 @@ function startGame(level, isRetry=false, skipNetSync=false){
       let a=new Alien(ax,ay,spd)
       a.obs={x:ax,y:ay,w:120,h:60}
       obstacles.push(a.obs)
+      // alien body is also a blood zone (same rect as obs, linked)
+      bloodZones.push(a.obs)
       aliens.push(a)
     }
   }
