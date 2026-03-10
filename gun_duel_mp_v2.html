@@ -1,0 +1,1667 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>PIXEL DUEL</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { overflow:hidden; background:#0d0820; }
+canvas { display:block; }
+
+/* ── LEVEL SELECT ── */
+#level-select {
+  position:absolute; inset:0;
+  display:flex; flex-direction:column;
+  align-items:center; justify-content:center;
+  background:#0d0820; z-index:20;
+}
+#level-select h1 {
+  font-family:monospace; font-size:36px; font-weight:bold;
+  color:#FFD700; letter-spacing:6px;
+  text-shadow:4px 4px 0 #8B6914,8px 8px 0 #000;
+  margin-bottom:10px;
+}
+#level-select p {
+  font-family:monospace; font-size:12px; color:#666;
+  margin-bottom:48px; letter-spacing:2px;
+}
+.level-cards {
+  display:flex; gap:32px;
+}
+.level-card {
+  width:200px; cursor:pointer;
+  border:3px solid #333; background:#12102a;
+  padding:0 0 20px 0; transition:border-color 0.15s, transform 0.15s;
+  font-family:monospace;
+}
+.level-card:hover { border-color:#FFD700; transform:translateY(-6px); }
+.level-card canvas { width:200px; height:120px; display:block; image-rendering:pixelated; }
+.level-card h2 { font-size:13px; color:#FFD700; text-align:center; margin:14px 0 6px; letter-spacing:2px; }
+.level-card p  { font-size:9px;  color:#888;    text-align:center; line-height:1.6; padding:0 12px; }
+
+/* ── GAME UI ── */
+#ui {
+  position:absolute; top:38%; left:50%;
+  transform:translate(-50%,-50%);
+  text-align:center; display:none; z-index:10;
+}
+#result {
+  font-size:40px; color:#FFD700;
+  text-shadow:4px 4px 0 #8B6914,8px 8px 0 #000;
+  letter-spacing:4px; margin-bottom:24px;
+  font-family:monospace; font-weight:bold;
+  animation:blink 0.7s infinite;
+}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0.4}}
+.ui-btn {
+  font-size:14px; padding:12px 28px; margin:6px;
+  border:3px solid #FFD700; background:#0d0820;
+  color:#FFD700; cursor:pointer; font-family:monospace; font-weight:bold;
+}
+.ui-btn:hover{background:#FFD700;color:#0d0820;}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<!-- LEVEL SELECT -->
+<div id="level-select">
+  <h1>PIXEL DUEL</h1>
+  <p>CHOOSE YOUR BATTLEFIELD</p>
+  <div class="level-cards">
+    <div class="level-card" onclick="startGame(1)">
+      <canvas id="prev1" width="200" height="120"></canvas>
+      <h2>WILD WEST</h2>
+      <p>Desert night. Clouds bounce bullets skyward.</p>
+    </div>
+    <div class="level-card" onclick="startGame(2)">
+      <canvas id="prev2" width="200" height="120"></canvas>
+      <h2>NEON CITY</h2>
+      <p>Street lamps and neon signs deflect your shots.</p>
+    </div>
+    <div class="level-card" onclick="startGame(3)">
+      <canvas id="prev3" width="200" height="120"></canvas>
+      <h2>MARS</h2>
+      <p>Red planet. Alien ships patrol the sky and ricochet bullets.</p>
+    </div>
+  </div>
+</div>
+
+<!-- GAME OVER UI -->
+<div id="ui">
+  <div id="result">VICTORY</div>
+  <button class="ui-btn" id="menu-btn" onclick="location.reload()">MENU</button>
+  <button class="ui-btn" id="retry-btn" onclick="restartLevel()">RETRY</button>
+</div>
+
+<script>
+const canvas  = document.getElementById('game')
+const ctx     = canvas.getContext('2d')
+const ui      = document.getElementById('ui')
+const resultEl= document.getElementById('result')
+const levelSel= document.getElementById('level-select')
+ctx.imageSmoothingEnabled = false
+canvas.width  = window.innerWidth
+canvas.height = window.innerHeight
+
+const W = canvas.width
+const H = canvas.height
+const GROUND = H - 110
+const SPRITE_GROUND = GROUND - 68
+
+function R(n){ return Math.round(n) }
+
+// ── CURRENT LEVEL ───────────────────────────────────────────
+let currentLevel = 0
+
+// ── STATE ────────────────────────────────────────────────────
+let timeScale=1, slowEnergy=1, isSlowmo=false, gameOver=false
+let slowmoGlowAlpha=0
+let bullets=[], particles=[], flashes=[], keys={}
+const SLOW_DRAIN=0.007, SLOW_REFILL=0.003, SLOW_SCALE=0.22
+
+// ── STARS ────────────────────────────────────────────────────
+const stars = Array.from({length:60},()=>({x:Math.random()*W,y:Math.random()*H*0.55,s:Math.random()<0.3?2:1,b:Math.random()}))
+const marsStars = Array.from({length:80},()=>({x:Math.random()*W,y:Math.random()*H*0.6,s:Math.random()<0.2?2:1,b:Math.random()}))
+
+// ── OBSTACLES (deflect bullets) ──────────────────────────────
+// {x,y,w,h} axis-aligned rects that bullets bounce off
+let obstacles = []
+
+// ── CLOUDS (level 1) ─────────────────────────────────────────
+class Cloud {
+  constructor(x,y,rx,ry,speed){
+    this.x=x; this.y=y; this.rx=rx; this.ry=ry; this.speed=speed
+    this.holes=[]
+    // pre-generate lobes relative to cloud centre
+    this.lobes=this._makeLobes(rx,ry)
+    // cached pixel list built once — stable grid
+    this._cache=null; this._cacheX=null
+  }
+  _makeLobes(rx,ry){
+    return [
+      {ox:0,        oy:0,        rx:rx,       ry:ry},
+      {ox:-rx*0.45, oy:-ry*0.45, rx:rx*0.275, ry:ry*0.275},
+      {ox: rx*0.40, oy:-ry*0.40, rx:rx*0.333, ry:ry*0.333},
+    ]
+  }
+  inCloud(lx,ly){
+    for(let l of this.lobes){
+      let dx=lx-l.ox, dy=ly-l.oy
+      if((dx*dx)/(l.rx*l.rx)+(dy*dy)/(l.ry*l.ry)<=1) return true
+    }
+    return false
+  }
+  // brightness 0-1 based on distance from centre of main lobe
+  _shade(lx,ly){
+    let d=Math.sqrt((lx*lx)/(this.rx*this.rx)+(ly*ly)/(this.ry*this.ry))
+    return Math.max(0,1-d*0.45)
+  }
+  contains(wx,wy){ return this.inCloud(wx-this.x, wy-this.y) }
+  addHole(wx,wy){ this.holes.push({lx:wx-this.x, ly:wy-this.y, r:6+Math.random()*5}) }
+  _buildCache(){
+    // Build pixel list on a grid anchored to integer multiples — independent of x position
+    const BL=4
+    let pixels=[]
+    let ext=this.rx+this.lobes.reduce((m,l)=>Math.max(m,Math.abs(l.ox)+l.rx),0)
+    let eyt=this.ry+this.lobes.reduce((m,l)=>Math.max(m,Math.abs(l.oy)+l.ry),0)
+    let x0=-Math.ceil(ext/BL)*BL, y0=-Math.ceil(eyt/BL)*BL
+    let x1= Math.ceil(ext/BL)*BL, y1= Math.ceil(this.ry/BL)*BL
+    for(let py=y0; py<y1; py+=BL){
+      for(let px=x0; px<x1; px+=BL){
+        let lx=px+BL/2, ly=py+BL/2
+        if(!this.inCloud(lx,ly)) continue
+        let v=Math.floor(200+this._shade(lx,ly)*55)
+        pixels.push({px,py,v})
+      }
+    }
+    this._cache=pixels
+  }
+  draw(){
+    if(!this._cache) this._buildCache()
+    const BL=4
+    // use real float position via translate — smooth movement, no pixel jitter
+    ctx.save()
+    ctx.translate(Math.round(this.x), Math.round(this.y))
+    for(let p of this._cache){
+      let lx=p.px+BL/2, ly=p.py+BL/2
+      let inHole=false
+      for(let h of this.holes){
+        let ddx=lx-h.lx, ddy=ly-h.ly
+        if(ddx*ddx+ddy*ddy<h.r*h.r){inHole=true;break}
+      }
+      if(inHole) continue
+      ctx.fillStyle='rgb('+p.v+','+p.v+','+p.v+')'
+      ctx.fillRect(p.px, p.py, BL, BL)
+    }
+    // dark ring around holes (in local coords)
+    for(let h of this.holes){
+      for(let a=0; a<Math.PI*2; a+=0.35){
+        let ex=Math.floor((h.lx+Math.cos(a)*(h.r+2))/BL)*BL
+        let ey=Math.floor((h.ly+Math.sin(a)*(h.r+2))/BL)*BL
+        if(!this.inCloud(ex,ey)) continue
+        ctx.fillStyle='rgba(60,40,20,0.45)'; ctx.fillRect(ex,ey,BL,BL)
+      }
+    }
+    ctx.restore()
+  }
+  update(dt){
+    this.x+=this.speed*dt*timeScale
+    if(this.speed>0&&this.x-this.rx>W+50) this.x=-this.rx-50
+    if(this.speed<0&&this.x+this.rx<-50)  this.x=W+this.rx+50
+  }
+}
+
+let clouds=[]
+
+// ── ALIENS (level 3) ─────────────────────────────────────────
+class Alien {
+  constructor(x,y,speed){
+    this.x=x; this.y=y; this.speed=speed
+    this.oy=y; this.phase=Math.random()*Math.PI*2
+    this.w=120; this.h=60
+  }
+  update(dt){
+    this.x+=this.speed*dt*timeScale
+    this.y=this.oy+Math.sin(Date.now()*0.002+this.phase)*18
+    if(this.speed>0&&this.x>W+160) this.x=-160
+    if(this.speed<0&&this.x<-160)  this.x=W+160
+    // sync obstacle
+    this.obs.x=this.x; this.obs.y=this.y
+  }
+  draw(){
+    let x=R(this.x),y=R(this.y)
+    // body – pixel art saucer (2× scale)
+    ctx.fillStyle='#44ee88'
+    ctx.fillRect(x+20,y+20,80,28)  // main disc
+    ctx.fillRect(x+36,y+4, 48,24)  // dome
+    ctx.fillStyle='#22aa55'
+    ctx.fillRect(x+20,y+20,80,8)   // shade
+    // porthole lights
+    let lt=Math.floor(Date.now()/300)%3
+    let cols=['#ff4466','#ffdd00','#44aaff']
+    for(let i=0;i<3;i++){
+      ctx.fillStyle=lt===i?'#ffffff':cols[i]
+      ctx.fillRect(x+32+i*24,y+26,12,12)
+    }
+    // glow
+    ctx.globalAlpha=0.18
+    ctx.fillStyle='#44ee88'
+    ctx.fillRect(x+12,y+12,96,48)
+    ctx.globalAlpha=1
+    // beam
+    if(Math.random()<0.05){
+      ctx.globalAlpha=0.12
+      ctx.fillStyle='#aaffaa'
+      ctx.fillRect(x+48,y+48,24,120)
+      ctx.globalAlpha=1
+    }
+  }
+}
+
+let aliens=[]
+
+// ── PARTICLES ────────────────────────────────────────────────
+class Particle {
+  constructor(x,y,type,col){
+    this.x=x;this.y=y;this.life=1;this.type=type
+    let spd=type==='spark'?2+Math.random()*5:1+Math.random()*4
+    let ang=Math.random()*Math.PI*2
+    this.dx=Math.cos(ang)*spd;this.dy=Math.sin(ang)*spd
+    this.size=type==='spark'?2:3+Math.random()*4
+    this.color=col||(type==='spark'?(Math.random()<0.5?'#FFD700':'#FF8C00'):(Math.random()<0.5?'#FF4422':'#FF8844'))
+  }
+  update(dt){this.x+=this.dx*dt*timeScale;this.y+=this.dy*dt*timeScale;this.dy+=0.2*dt*timeScale;this.life-=0.045*dt*timeScale*(isSlowmo?0.2:1)}
+  draw(){ctx.globalAlpha=Math.max(0,this.life);ctx.fillStyle=this.color;ctx.fillRect(R(this.x),R(this.y),this.size,this.size);ctx.globalAlpha=1}
+}
+class Flash{
+  constructor(x,y,col){this.x=x;this.y=y;this.life=1;this.col=col}
+  update(dt){this.life-=0.18*dt*timeScale}
+  draw(){if(this.life<=0)return;ctx.globalAlpha=this.life;ctx.fillStyle=this.col;let s=8+R(Math.random()*10);ctx.fillRect(R(this.x-s/2),R(this.y-s/2),s,s);ctx.globalAlpha=1}
+}
+
+// ── BLOOD ─────────────────────────────────────────────────────
+let bloodStains=[], bloodDrops=[]
+
+class BloodDrop{
+  constructor(x,y,dirX){
+    this.x=x;this.y=y
+    let spread=0.8+Math.random()*0.6
+    this.dx=-dirX*(2+Math.random()*5)*spread+(Math.random()-0.5)*3
+    this.dy=-(3+Math.random()*7)
+    this.size=1+Math.random()*3
+    this.settled=false
+  }
+  update(dt){
+    if(this.settled)return
+    this.dy+=0.55*dt*timeScale
+    this.x+=this.dx*dt*timeScale
+    this.y+=this.dy*dt*timeScale
+    for(let o of obstacles){
+      if(this.x>=o.x&&this.x<=o.x+o.w&&this.y>=o.y&&this.y<=o.y+o.h){
+        this.settled=true
+        bloodStains.push({type:'obstacle',obs:o,rx:this.x-o.x,ry:this.y-o.y,size:this.size*1.4,alpha:0.6+Math.random()*0.4})
+        return
+      }
+    }
+    if(this.y>=GROUND-2){
+      this.y=GROUND-2;this.settled=true
+      bloodStains.push({type:'ground',x:this.x,y:this.y,size:this.size*1.6,alpha:0.7+Math.random()*0.3})
+    }
+  }
+  draw(){
+    if(this.settled)return
+    ctx.globalAlpha=0.9;ctx.fillStyle='#cc0000'
+    ctx.fillRect(R(this.x),R(this.y),R(this.size),R(this.size))
+    ctx.globalAlpha=1
+  }
+}
+
+function drawBloodStains(){
+  for(let s of bloodStains){
+    ctx.globalAlpha=s.alpha*0.85;ctx.fillStyle='#880000'
+    if(s.type==='ground'){
+      ctx.beginPath();ctx.ellipse(R(s.x),R(s.y),R(s.size*1.2),R(s.size*0.5),0,0,Math.PI*2);ctx.fill()
+    } else {
+      let wx=s.obs.x+s.rx,wy=s.obs.y+s.ry
+      ctx.beginPath();ctx.arc(R(wx),R(wy),R(s.size),0,Math.PI*2);ctx.fill()
+      ctx.fillRect(R(wx-s.size*0.3),R(wy),R(s.size*0.6),R(s.size*2))
+    }
+  }
+  ctx.globalAlpha=1
+}
+
+// ── BULLET ───────────────────────────────────────────────────
+class Bullet{
+  constructor(x,y,angle,owner){
+    this.x=x;this.y=y;this.owner=owner
+    this.speed=4.9;this.dx=Math.cos(angle)*this.speed;this.dy=Math.sin(angle)*this.speed
+    this.r=5;this.trail=[]
+    this.pathTrail=[];this._pathD=0;this._sinceLastPt=0
+  }
+  update(dt){
+    this.trail.push({x:this.x,y:this.y})
+    if(this.trail.length>36)this.trail.shift()
+    // path trail at full speed — one point per ~10px
+    let fx=this.x+this.dx*dt, fy=this.y+this.dy*dt
+    if(this.pathTrail.length>0){
+      let prev=this.pathTrail[this.pathTrail.length-1]
+      let ddx=fx-prev.x, ddy=fy-prev.y
+      let step=Math.sqrt(ddx*ddx+ddy*ddy)
+      this._pathD+=step
+      this._sinceLastPt+=step
+      if(this._sinceLastPt>=10){ this._sinceLastPt=0; this.pathTrail.push({x:fx,y:fy,d:this._pathD}) }
+    } else {
+      this._sinceLastPt=0; this.pathTrail.push({x:fx,y:fy,d:this._pathD})
+    }
+    while(this.pathTrail.length>1 && this._pathD-this.pathTrail[0].d>600) this.pathTrail.shift()
+    let ts=timeScale*dt
+    this.x+=this.dx*ts;this.y+=this.dy*ts
+    // wall bounce
+    if(this.x-this.r<0){this.x=this.r;this.dx=Math.abs(this.dx);spark(this.x,this.y)}
+    if(this.x+this.r>W){this.x=W-this.r;this.dx=-Math.abs(this.dx);spark(this.x,this.y)}
+    if(this.y-this.r<0){this.y=this.r;this.dy=Math.abs(this.dy);spark(this.x,this.y)}
+    if(this.y+this.r>H){this.y=H-this.r;this.dy=-Math.abs(this.dy);spark(this.x,this.y)}
+    // obstacle bounce
+    for(let o of obstacles){
+      if(this.x+this.r>o.x&&this.x-this.r<o.x+o.w&&this.y+this.r>o.y&&this.y-this.r<o.y+o.h){
+        // figure out which axis to bounce
+        let overlapL=this.x+this.r-o.x, overlapR=o.x+o.w-this.x+this.r
+        let overlapT=this.y+this.r-o.y, overlapB=o.y+o.h-this.y+this.r
+        let minH=Math.min(overlapL,overlapR), minV=Math.min(overlapT,overlapB)
+        if(minH<minV){ this.dx*=-1; this.x+=this.dx>0?2:-2 }
+        else         { this.dy*=-1; this.y+=this.dy>0?2:-2 }
+        spark(this.x,this.y)
+        break
+      }
+    }
+    // clouds (level 1 only)
+    for(let c of clouds) if(c.contains(this.x,this.y)) c.addHole(this.x,this.y)
+  }
+  draw(){
+    let col = this.owner==='player' ? '#00ffff' : '#ff4422'
+    let len = this.trail.length
+    for(let i=0;i<len;i++){
+      let t=this.trail[i]
+      let frac=i/len
+      let sz=Math.max(1, this.r * frac)
+      ctx.globalAlpha=frac*0.55
+      ctx.fillStyle=col
+      ctx.fillRect(R(t.x-sz/2),R(t.y-sz/2),sz,sz)
+    }
+    ctx.globalAlpha=1
+    ctx.fillStyle=col
+    ctx.fillRect(R(this.x-this.r),R(this.y-this.r),this.r*2,this.r*2)
+    ctx.fillStyle=this.owner==='player'?'#ffffff':'#ffaa00'
+    ctx.fillRect(R(this.x-2),R(this.y-2),4,4)
+  }
+  drawSlowmoHalo(){
+    if(slowmoGlowAlpha<=0 || this.pathTrail.length<2) return
+    let hr=this.r+4
+    let pts=this.pathTrail, headD=this._pathD
+    for(let i=0;i<pts.length;i++){
+      let pt=pts[i]
+      let age=headD-pt.d
+      let frac=1-(age/600)
+      if(frac<=0) continue
+      let alpha=frac*slowmoGlowAlpha*0.1
+      let grd=ctx.createRadialGradient(pt.x,pt.y,0,pt.x,pt.y,hr)
+      grd.addColorStop(0,  `rgba(255,255,255,0)`)
+      grd.addColorStop(0.5,`rgba(255,255,255,${(alpha*0.4).toFixed(3)})`)
+      grd.addColorStop(1,  `rgba(255,255,255,${alpha.toFixed(3)})`)
+      ctx.globalAlpha=1
+      ctx.fillStyle=grd
+      ctx.beginPath();ctx.arc(pt.x,pt.y,hr,0,Math.PI*2);ctx.fill()
+    }
+    ctx.globalAlpha=1
+  }
+}
+function spark(x,y,col){for(let i=0;i<5;i++)particles.push(new Particle(x,y,'spark',col))}
+
+// ── FLYING HAT ───────────────────────────────────────────────
+class FlyingHat{
+  constructor(x,y,palette,bulletDx){
+    this.x=x; this.y=y
+    this.dx=(bulletDx>0?2:-2)+(Math.random()-0.5)*3
+    this.dy=-6-Math.random()*3
+    this.spin=0
+    this.spinSpeed=(Math.random()-0.5)*0.25
+    this.P=palette
+    this.onGround=false
+    this.bounces=0
+  }
+  update(dt){
+    this.x+=this.dx*dt*timeScale
+    this.dy+=0.5*dt*timeScale
+    this.y+=this.dy*dt*timeScale
+    this.spin+=this.spinSpeed*dt*timeScale
+    if(this.y>GROUND-10){
+      this.y=GROUND-10
+      this.dy*=-0.4
+      this.dx*=0.7
+      this.spinSpeed*=0.5
+      this.bounces++
+    }
+    if(this.x<0){this.x=0;this.dx=Math.abs(this.dx)}
+    if(this.x>W-28){this.x=W-28;this.dx=-Math.abs(this.dx)}
+  }
+  draw(){
+    let w=this.w||28
+    ctx.save()
+    ctx.translate(R(this.x+w/2), R(this.y))
+    ctx.rotate(this.spin)
+    ctx.fillStyle=this.P.hat
+    // crown
+    ctx.fillRect(-w/2+8,-14,w-16,16)
+    // brim
+    ctx.fillRect(-w/2+2,0,w-4,5)
+    ctx.fillRect(-w/2,  -2,4,4)
+    ctx.fillRect( w/2-4,-2,4,4)
+    ctx.fillRect(-w/2-2,-4,4,4)
+    ctx.fillRect( w/2-2,-4,4,4)
+    // hatband
+    ctx.fillStyle=this.P.hatband
+    ctx.fillRect(-w/2+8,-2,w-16,3)
+    ctx.restore()
+  }
+}
+let flyingHats=[]
+
+// ── FLYING GUN ───────────────────────────────────────────────
+class FlyingGun{
+  constructor(x,y,dirX){
+    this.x=x; this.y=y
+    this.dx=(dirX>0?3:-3)+(Math.random()-0.5)*3
+    this.dy=-5-Math.random()*4
+    this.spin=0
+    this.spinSpeed=(Math.random()*0.18+0.08)*(dirX>0?1:-1)
+  }
+  update(dt){
+    this.dy+=0.7*dt*timeScale
+    this.x+=this.dx*dt*timeScale
+    this.y+=this.dy*dt*timeScale
+    this.spin+=this.spinSpeed*dt*timeScale
+    let ground=GROUND-10
+    if(this.y>=ground){
+      this.y=ground
+      this.dy=0; this.dx*=0.7; this.spinSpeed=0
+    }
+    if(this.x<0){this.x=0;this.dx=Math.abs(this.dx)}
+    if(this.x>W-50){this.x=W-50;this.dx=-Math.abs(this.dx)}
+  }
+  draw(){
+    ctx.save()
+    ctx.translate(R(this.x),R(this.y))
+    ctx.rotate(this.spin)
+    // gun sprite (same as player gun, centered)
+    ctx.fillStyle='#e8dfc0';ctx.fillRect(-6,2,14,14)   // grip
+    ctx.fillStyle='#c8b890';ctx.fillRect(-4,4,4,4);ctx.fillRect(-4,10,4,4)
+    ctx.fillStyle='#aaaaaa';ctx.fillRect(-8,-7,38,12)   // slide
+    ctx.fillStyle='#cccccc';ctx.fillRect(-6,-7,36,5)
+    ctx.fillStyle='#555';ctx.fillRect(6,-6,10,4)        // port
+    ctx.fillStyle='#999';ctx.fillRect(-8,-8,5,5)        // hammer
+    ctx.fillStyle='#333';ctx.fillRect(-6,4,12,5);ctx.fillRect(-6,9,3,4) // guard
+    ctx.restore()
+  }
+}
+let flyingGuns=[]
+
+// ── PLAYER ───────────────────────────────────────────────────
+class Player{
+  constructor(x,facing,palette){
+    this.x=x;this.y=SPRITE_GROUND
+    this.w=32;this.h=64
+    this.vy=0;this.onGround=true
+    this.angle=0;this.facing=facing
+    this.ammo=6;this.maxAmmo=6
+    this.lives=3;this.invincible=0
+    this.walkFrame=0;this.walkTimer=0;this.moving=false
+    this.reloading=false;this.reloadTimer=0
+    this.P=palette
+    this.hasHat=true
+    this.hairStyle=Math.floor(seededRand()*15)  // 0–14
+    // ragdoll
+    this.dead=false; this.deadVy=0; this.deadAngle=0; this.deadSpin=0
+  }
+  draw(){
+    if(this.invincible>0&&Math.floor(this.invincible/5)%2===1) ctx.globalAlpha=0.25
+    let px=R(this.x),py=R(this.y),w=this.w,P=this.P,f=this.facing
+    // ragdoll: rotate entire sprite around its centre
+    let ragdoll=this.dead
+    if(ragdoll){
+      ctx.save()
+      ctx.translate(px+w/2, py+this.h/2)
+      ctx.rotate(this.deadAngle)
+      ctx.translate(-w/2, -this.h/2)
+      px=0; py=0
+    }
+    // ── COWBOY HAT or HAIRSTYLE ────────────────────────────────
+    if(this.hasHat){
+      ctx.fillStyle=P.hat
+      ctx.fillRect(px+8,  py-14, w-16, 16)
+      ctx.fillRect(px+2,  py,    w-4,  5)
+      ctx.fillRect(px,    py-2,  4,    4)
+      ctx.fillRect(px+w-4,py-2,  4,    4)
+      ctx.fillRect(px-2,  py-4,  4,    4)
+      ctx.fillRect(px+w-2,py-4,  4,    4)
+      ctx.fillStyle=P.hatband
+      ctx.fillRect(px+8, py-2, w-16, 3)
+    } else {
+      // Head top is at py+5. Hair grows upward from there.
+      let hs=this.hairStyle
+      let hx=px+6, hw=w-12   // same width as head rect
+      let ht=py+5             // top of head — hair base
+
+      if(hs===0){
+        // 🟠 Afro — wide poofy ball sitting on top of head
+        ctx.fillStyle='#cc6600'
+        ctx.fillRect(hx-4,  ht-12, hw+8, 12)   // wide base layer
+        ctx.fillRect(hx-2,  ht-16, hw+4, 6)    // mid poof
+        ctx.fillRect(hx,    ht-18, hw,   4)    // top
+        ctx.fillStyle='#ff8800'
+        ctx.fillRect(hx-2,  ht-14, hw+4, 8)    // bright centre
+        ctx.fillRect(hx,    ht-17, hw-4, 4)
+      }
+      if(hs===1){
+        // 💜 Mohawk — half height, central strip only
+        ctx.fillStyle='#aa00cc'
+        ctx.fillRect(px+w/2-4, ht-14, 8, 14)   // base strip
+        ctx.fillStyle='#cc22ff'
+        ctx.fillRect(px+w/2-3, ht-14, 6, 10)   // bright centre
+        // two small side spikes
+        ctx.fillStyle='#ee44ff'
+        ctx.fillRect(px+w/2-5, ht-10, 3, 6)
+        ctx.fillRect(px+w/2+2, ht-10, 3, 6)
+        ctx.fillRect(px+w/2-2, ht-16, 4, 4)    // top spike
+      }
+      if(hs===2){
+        // 🟢 Tiny green tuft — small puff dead centre
+        ctx.fillStyle='#22aa22'
+        ctx.fillRect(hx+hw/2-4, ht-8, 8, 8)
+        ctx.fillRect(hx+hw/2-3, ht-10, 6, 4)
+        ctx.fillStyle='#55dd55'
+        ctx.fillRect(hx+hw/2-2, ht-9, 4, 5)
+      }
+      if(hs===3){
+        // 🔵 Slick side-sweep — flat wave hugging head top
+        ctx.fillStyle='#0066cc'
+        ctx.fillRect(hx,    ht-10, hw,   10)   // full width base
+        ctx.fillRect(hx-2,  ht-8,  4,    8)    // left overhang
+        ctx.fillStyle='#2288ff'
+        ctx.fillRect(hx+2,  ht-10, hw-4, 6)    // lighter top layer
+        ctx.fillStyle='#66aaff'
+        ctx.fillRect(hx+4,  ht-10, hw-8, 3)    // highlight shine
+      }
+      if(hs===4){
+        // 🔴 Two top buns — small round bumps symmetrically placed
+        ctx.fillStyle='#cc1133'
+        ctx.fillRect(hx,       ht-10, hw/2-1, 10)   // left bun
+        ctx.fillRect(hx+hw/2+1,ht-10, hw/2-1, 10)   // right bun
+        ctx.fillRect(hx+2,     ht-12, hw/2-4, 4)    // left bun top
+        ctx.fillRect(hx+hw/2+2,ht-12, hw/2-4, 4)    // right bun top
+        ctx.fillStyle='#ff4466'
+        ctx.fillRect(hx+2,     ht-10, hw/2-4, 6)
+        ctx.fillRect(hx+hw/2+2,ht-10, hw/2-4, 6)
+      }
+      if(hs===5){
+        // ⚫ Crew cut — short flat dark stubble
+        ctx.fillStyle='#222222'
+        ctx.fillRect(hx, ht-5, hw, 5)
+        ctx.fillStyle='#444444'
+        ctx.fillRect(hx+2, ht-5, hw-4, 3)
+      }
+      if(hs===6){
+        // 🟡 Wavy blonde — two wavy rows of yellow
+        ctx.fillStyle='#ccaa00'
+        ctx.fillRect(hx,   ht-8, hw,   8)
+        ctx.fillStyle='#ffdd22'
+        ctx.fillRect(hx+2, ht-8, 4,    8)
+        ctx.fillRect(hx+10,ht-8, 4,    8)
+        ctx.fillRect(hx+2, ht-10,hw-4, 4)
+        ctx.fillStyle='#ffe866'
+        ctx.fillRect(hx+4, ht-10,hw-8, 2)
+      }
+      if(hs===7){
+        // 🩶 Silver bowl cut — neat rounded cap
+        ctx.fillStyle='#999999'
+        ctx.fillRect(hx-2,  ht-12, hw+4, 12)
+        ctx.fillStyle='#bbbbbb'
+        ctx.fillRect(hx,    ht-12, hw,   8)
+        ctx.fillRect(hx-2,  ht-8,  4,    8)   // left flap
+        ctx.fillRect(hx+hw-2,ht-8, 4,    8)   // right flap
+        ctx.fillStyle='#dddddd'
+        ctx.fillRect(hx+2,  ht-12, hw-4, 4)   // highlight
+      }
+      if(hs===8){
+        // 🟤 Messy brown bedhead — random jagged chunks
+        ctx.fillStyle='#6b3a1a'
+        ctx.fillRect(hx,    ht-8,  hw,   8)
+        ctx.fillRect(hx-2,  ht-6,  4,    6)
+        ctx.fillRect(hx+hw-2,ht-6, 4,    6)
+        ctx.fillStyle='#8b5a2a'
+        ctx.fillRect(hx,    ht-10, 6,    6)
+        ctx.fillRect(hx+6,  ht-12, 6,    8)
+        ctx.fillRect(hx+12, ht-9,  hw-12,5)
+        ctx.fillStyle='#aa7744'
+        ctx.fillRect(hx+2,  ht-8,  4,    4)
+        ctx.fillRect(hx+8,  ht-10, 4,    4)
+      }
+      if(hs===9){
+        // ⚪ White combover — thin side-parted stripe
+        ctx.fillStyle='#ddddcc'
+        ctx.fillRect(hx,    ht-6,  hw,   6)
+        ctx.fillRect(hx,    ht-10, hw/2, 6)   // left thicker side
+        ctx.fillStyle='#ffffff'
+        ctx.fillRect(hx+2,  ht-8,  hw/2-2, 4)
+        ctx.fillStyle='#bbbbaa'
+        ctx.fillRect(hx+hw/2,ht-6, 2,    6)   // part line shadow
+      }
+      if(hs===10){
+        // 🟣 Dreadlocks — thick purple ropes hanging off sides
+        ctx.fillStyle='#7722aa'
+        ctx.fillRect(hx,      ht-8, hw, 8)     // top base
+        // left dreads hanging down
+        ctx.fillRect(hx-2,    ht,   6, 14)
+        ctx.fillRect(hx+2,    ht+4, 4, 10)
+        // right dreads
+        ctx.fillRect(hx+hw-4, ht,   6, 14)
+        ctx.fillRect(hx+hw-6, ht+4, 4, 10)
+        ctx.fillStyle='#aa44dd'
+        ctx.fillRect(hx+2, ht-8, hw-4, 5)     // highlight strip
+      }
+      if(hs===11){
+        // 🔶 Spiky orange — multiple sharp spikes pointing up
+        ctx.fillStyle='#dd6600'
+        ctx.fillRect(hx, ht-6, hw, 6)          // base
+        ctx.fillStyle='#ff8800'
+        // five spikes of varying heights
+        for(let [sx,sh] of [[0,10],[4,14],[8,10],[12,16],[16,8]]){
+          ctx.fillRect(hx+sx, ht-6-sh, 4, sh)
+        }
+        ctx.fillStyle='#ffcc44'
+        for(let [sx,sh] of [[0,10],[4,14],[8,10],[12,16],[16,8]]){
+          ctx.fillRect(hx+sx+1, ht-6-sh, 2, 4)  // tip highlight
+        }
+      }
+      if(hs===12){
+        // 🩵 Emo side-fringe — dark with long bang over one eye
+        ctx.fillStyle='#111122'
+        ctx.fillRect(hx,   ht-10, hw,   10)    // full cap
+        ctx.fillRect(hx-2, ht-8,  6,    14)    // left fringe hanging down
+        ctx.fillRect(hx-2, ht+4,  4,    8)     // fringe tip
+        ctx.fillStyle='#3333aa'
+        ctx.fillRect(hx+2, ht-10, hw-4, 4)     // subtle blue sheen
+        ctx.fillRect(hx,   ht-8,  3,    6)
+      }
+      if(hs===13){
+        // 🌸 Pink twin braids — two neat braids on each side
+        ctx.fillStyle='#ee44aa'
+        ctx.fillRect(hx,      ht-8, hw, 8)     // top
+        // left braid segments (alternating width)
+        for(let i=0;i<4;i++){
+          ctx.fillStyle=i%2===0?'#ee44aa':'#ff88cc'
+          ctx.fillRect(hx-2, ht+i*5, 6, 5)
+        }
+        // right braid segments
+        for(let i=0;i<4;i++){
+          ctx.fillStyle=i%2===0?'#ee44aa':'#ff88cc'
+          ctx.fillRect(hx+hw-4, ht+i*5, 6, 5)
+        }
+        ctx.fillStyle='#ffbbdd'
+        ctx.fillRect(hx+2, ht-8, hw-4, 3)      // highlight
+      }
+      if(hs===14){
+        // 🟫 Curly chestnut — tight curly rows of brown
+        ctx.fillStyle='#7a3b10'
+        ctx.fillRect(hx,   ht-10, hw,   10)
+        ctx.fillStyle='#a05520'
+        // curly bumps: offset rows
+        for(let cx=hx;cx<hx+hw-4;cx+=6) ctx.fillRect(cx, ht-14, 6, 6)
+        for(let cx=hx+3;cx<hx+hw-4;cx+=6) ctx.fillRect(cx, ht-10, 5, 4)
+        ctx.fillStyle='#c87a3a'
+        for(let cx=hx+1;cx<hx+hw-4;cx+=6) ctx.fillRect(cx, ht-13, 3, 3)
+      }
+    }
+    ctx.fillStyle=P.skin;ctx.fillRect(px+6,py+5,w-12,16)
+    // two eyes — look toward aim (invert: aimLeft means facing right visually)
+    let aimRight=Math.cos(this.angle)<0
+    let eyeBase=aimRight?(px+8):(px+14)
+    ctx.fillStyle='#fff';ctx.fillRect(eyeBase,py+9,4,4);ctx.fillRect(eyeBase+6,py+9,4,4)
+    ctx.fillStyle='#000';ctx.fillRect(eyeBase+(aimRight?0:2),py+9,2,4);ctx.fillRect(eyeBase+6+(aimRight?0:2),py+9,2,4)
+    ctx.fillStyle=P.hair;ctx.fillRect(px+8,py+18,w-16,2)
+    ctx.fillStyle=P.shirt;ctx.fillRect(px+2,py+20,w-4,24)
+    ctx.fillStyle=P.belt;ctx.fillRect(px+2,py+42,w-4,4)
+    ctx.fillStyle='#FFD700';ctx.fillRect(px+w/2-4,py+42,8,4)
+    let lo=0;if(this.moving&&this.onGround)lo=R(Math.sin(this.walkFrame)*4)
+    ctx.fillStyle=P.pants;ctx.fillRect(px+2,py+46,12,18+lo);ctx.fillRect(px+w-14,py+46,12,18-lo)
+    ctx.fillStyle=P.boot;ctx.fillRect(px,py+62+lo,14,6);ctx.fillRect(px+w-14,py+62-lo,14,6)
+    // arm and gun — hidden when dead
+    if(!ragdoll){
+    let ax=px+(f>0?w:0),ay=py+30
+    // Normalise angle so gun always renders pointing right, flipped via scale when needed
+    let aimAng=this.angle
+    let flipX=Math.cos(aimAng)<0   // aiming leftward
+    let drawAng=flipX?Math.PI-aimAng:aimAng  // mirror angle into right half
+    ctx.save();ctx.translate(ax,ay);if(flipX)ctx.scale(-1,1);ctx.rotate(drawAng)
+    ctx.fillStyle=P.skin;ctx.fillRect(0,-5,22,9)
+    ctx.restore()
+    // ── GUN drawn LAST, fully on top ──────────────────────────
+    ctx.save();ctx.translate(ax,ay);if(flipX)ctx.scale(-1,1);ctx.rotate(drawAng)
+    // grip / handle — ivory
+    ctx.fillStyle='#e8dfc0';ctx.fillRect(14, 2, 14, 14)
+    // grip screws
+    ctx.fillStyle='#c8b890';ctx.fillRect(16, 4, 4, 4);ctx.fillRect(16, 10, 4, 4)
+    // frame / slide body — silver
+    ctx.fillStyle='#aaaaaa';ctx.fillRect(12,-7,38,12)
+    // slide top detail — lighter silver
+    ctx.fillStyle='#cccccc';ctx.fillRect(14,-7,36,5)
+    // ejection port notch
+    ctx.fillStyle='#555';ctx.fillRect(26,-6,10,4)
+    // hammer
+    ctx.fillStyle='#999';ctx.fillRect(12,-8,5,5)
+    // trigger guard
+    ctx.fillStyle='#333';ctx.fillRect(14,4,12,5);ctx.fillRect(14,9,3,4)
+    ctx.restore()
+    } // end arm+gun block
+    // close ragdoll transform if active
+    if(ragdoll) ctx.restore()
+    ctx.globalAlpha=1
+  }
+  update(dt){
+    this.moving=false
+    if(keys['KeyA']||keys['ArrowLeft']) {this.x-=4*dt*timeScale;this.moving=true}
+    if(keys['KeyD']||keys['ArrowRight']){this.x+=4*dt*timeScale;this.moving=true}
+    if((keys['Space']||keys['ArrowUp'])&&this.onGround){this.vy=-13;this.onGround=false}
+    if(this.moving){this.walkTimer+=dt*timeScale;this.walkFrame=this.walkTimer*0.2}
+    this.vy+=0.65*dt*timeScale;this.y+=this.vy*dt*timeScale
+    if(this.y>=SPRITE_GROUND){this.y=SPRITE_GROUND;this.vy=0;this.onGround=true}
+    this.x=Math.max(0,Math.min(W-this.w,this.x))
+    if(this.invincible>0)this.invincible-=dt*timeScale
+    if(this.reloading){this.reloadTimer-=dt;if(this.reloadTimer<=0){this.ammo=this.maxAmmo;this.reloading=false}}
+    if(this.ammo<=0&&!this.reloading){this.reloading=true;this.reloadTimer=60}
+  }
+  updateRagdoll(dt){
+    this.deadVy+=1.0*dt*timeScale
+    this.y+=this.deadVy*dt*timeScale
+    // horizontal drift limited to 10px total
+    let driftDir=this.deadTargetAngle>0?1:-1
+    if(Math.abs(this.deadDriftX)<10){
+      let step=driftDir*0.8*dt*timeScale
+      this.deadDriftX+=step
+      this.x+=step
+    }
+    // rotate toward target angle smoothly, then lock
+    let diff=this.deadTargetAngle-this.deadAngle
+    if(Math.abs(diff)>0.01){
+      this.deadAngle+=diff*0.10*dt*timeScale
+    } else {
+      this.deadAngle=this.deadTargetAngle
+    }
+    // one small bounce then stop
+    let ground=SPRITE_GROUND+this.h*0.55
+    if(this.y>=ground){
+      this.y=ground
+      if(!this.deadBounced){
+        this.deadBounced=true
+        if(this.deadVy>1){ this.deadVy=-5 }
+        else { this.deadVy=0 }
+      } else {
+        this.deadVy=0
+      }
+    }
+  }
+  gunTip(){let ax=this.x+(this.facing>0?this.w:0),ay=this.y+30;return{x:ax+Math.cos(this.angle)*44,y:ay+Math.sin(this.angle)*44}}
+}
+
+class Enemy extends Player{
+  constructor(x,facing,palette){super(x,facing,palette);this.aimNoise=0;this.shootCooldown=30}
+  updateAI(dt,target){
+    if(gameOver)return
+    let ax=this.x+this.w/2,ay=this.y+30,tx=target.x+target.w/2,ty=target.y+30
+    let ideal=Math.atan2(ty-ay,tx-ax)
+    this.aimNoise+=(Math.random()-0.5)*0.08;this.aimNoise*=0.9;this.angle=ideal+this.aimNoise
+    this.moving=false
+    let distToPlayer=Math.abs(ax-tx),preferredDist=W*0.38,halfField=W*0.5
+    for(let b of bullets){
+      if(b.owner==='player'){
+        let dx=b.x-this.x,dy=b.y-this.y
+        if(Math.sqrt(dx*dx+dy*dy)<250){this.x+=(b.dx<0?3:-3)*dt*timeScale;this.moving=true;if(this.onGround&&Math.random()<0.02){this.vy=-13;this.onGround=false}}
+      }
+    }
+    if(this.x+this.w/2<halfField){this.x+=2.5*dt*timeScale;this.moving=true}
+    if(distToPlayer<preferredDist&&tx<ax){this.x+=2*dt*timeScale;this.moving=true}
+    if(distToPlayer>preferredDist*1.6&&this.x+this.w/2>halfField){this.x-=1*dt*timeScale;this.moving=true}
+    if(this.x<halfField-this.w)this.x=halfField-this.w
+    this.shootCooldown-=dt*timeScale
+    if(this.shootCooldown<=0&&this.ammo>0&&!this.reloading){this.shootCooldown=25+Math.random()*30;shoot(this,'enemy')}
+  }
+}
+
+
+// ── PALETTES (randomised on new level, preserved on retry) ───
+let playerPalette={hat:'#8b6914',hatband:'#2255cc',skin:'#f5c88a',hair:'#3a2010',shirt:'#3355aa',belt:'#4a3520',pants:'#2a4080',boot:'#2a1a08'}
+let enemyPalette ={hat:'#5a5a5a',hatband:'#cc2222',skin:'#e8b870',hair:'#1a1a1a',shirt:'#882222',belt:'#2a1a08',pants:'#1a1a1a',boot:'#111111'}
+
+// ── SEEDED RNG (mulberry32) ───────────────────────────────────
+let _rngState = 0
+function seedRng(seed){ _rngState = seed >>> 0 }
+function seededRand(){
+  _rngState |= 0; _rngState = _rngState + 0x6D2B79F5 | 0
+  let t = Math.imul(_rngState ^ _rngState >>> 15, 1 | _rngState)
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t
+  return ((t ^ t >>> 14) >>> 0) / 4294967296
+}
+
+function rndCol(hues){
+  let h=hues[Math.floor(seededRand()*hues.length)]
+  let s=50+seededRand()*40, l=30+seededRand()*30
+  return `hsl(${h},${s}%,${l}%)`
+}
+const PLAYER_NAMES=['BILLY','HANK','CLINT','WADE','BUCK','JESSE','COLE','ROY','COLT','DEAN','EARL','FORD','GUS','HOMER','IKE','JAKE','KID','LUKE','MACK','NED','OTTO','PETE','QUINN','REED','SAM','TEX','ULF','VERN','WES','ZEKE']
+const ENEMY_NAMES=['OUTLAW','SNAKE','VIPER','DUSK','ACE','BANDIT','RINGO','MORT','SCAR','DAGGER','FANG','GRIMM','HAWK','IRON','JADE','KNIFE','LOCO','MAVERICK','NOOSE','OMEN','PISTOL','QUARREL','RAZOR','SHADOW','TRIGGER','UGLY','VENOM','WRAITH','XERXES','ZERO']
+let playerName='BILLY', enemyName='OUTLAW'
+
+function randomisePalettes(){
+  // Player — always cooler tones (blues/greens/teals), player skin light
+  let pShirt=rndCol([180,200,220,240,160,140])
+  let pPants=rndCol([200,220,240,260,180])
+  let pHat  =rndCol([30,40,50,60,70,80])   // warm hat tones
+  playerPalette={
+    hat:pHat, hatband:rndCol([220,240,200,180]),
+    skin:'#f5c88a', hair:rndCol([20,30,10,0,40]),
+    shirt:pShirt, belt:rndCol([20,30,40]),
+    pants:pPants, boot:rndCol([20,25,30])
+  }
+  // Enemy — warmer tones (reds/oranges/purples), slightly darker skin
+  let eShirt=rndCol([0,15,30,300,330,350])
+  let ePants=rndCol([0,20,340,300,280])
+  let eHat  =rndCol([0,20,40,300,260])
+  enemyPalette={
+    hat:eHat, hatband:rndCol([0,15,350,340]),
+    skin:'#e8b870', hair:rndCol([0,10,20,350,330]),
+    shirt:eShirt, belt:rndCol([0,10,20]),
+    pants:ePants, boot:rndCol([0,10,15,350])
+  }
+}
+let player, enemy
+
+// ── SHOOT ────────────────────────────────────────────────────
+function shoot(p,owner){
+  if(p.ammo<=0||p.reloading)return
+  let t=p.gunTip()
+  bullets.push(new Bullet(t.x,t.y,p.angle,owner))
+  p.ammo--
+  flashes.push(new Flash(t.x,t.y,owner==='player'?'#00ffff':'#ff4422'))
+  for(let i=0;i<4;i++)particles.push(new Particle(t.x,t.y,'spark'))
+}
+
+// ── MULTIPLAYER ──────────────────────────────────────────────
+let mp = {
+  ws: null, role: null, connected: false, guestReady: false,
+  guestKeys: {}, guestAngle: 0, guestFacing: -1,
+  stateInterval: null, overlay: null
+}
+
+function mpConnect() {
+  // Determine WS URL from current page URL
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  const wsUrl = `${proto}://${location.host}`
+  mp.ws = new WebSocket(wsUrl)
+
+  mp.ws.onopen = () => {
+    mp.ws.send(JSON.stringify({ type: 'join' }))
+  }
+
+  mp.ws.onmessage = (e) => {
+    let msg
+    try { msg = JSON.parse(e.data) } catch { return }
+
+    if (msg.type === 'role') {
+      mp.role = msg.role
+      mp.connected = true
+      console.log('[MP] role assigned:', mp.role)
+      if (msg.role === 'host') mpShowOverlay('🤠 You are BILLY\nWaiting for second player...')
+      else mpShowOverlay('🔫 You are OUTLAW\nWaiting for host to start...')
+      if (msg.role === 'guest') mpStartSendingInputs()
+    }
+
+    if (msg.type === 'guest_joined') {
+      mp.guestReady = true
+      mpHideOverlay()
+      // Show level select to host
+      levelSel.style.display = 'flex'
+    }
+
+    if (msg.type === 'start_level') {
+      // Guest receives level start command from host
+      mpHideOverlay()
+      mp.currentSeed = msg.seed || 12345
+      startGame(msg.level, false, false)  // skipNetSync=false so guest starts sending inputs
+    }
+
+    if (msg.type === 'input') {
+      // Host receives guest inputs
+      if (mp.role === 'host') {
+        mp.guestKeys = msg.keys || {}
+        mp.guestAngle = msg.angle ?? 0
+        mp.guestFacing = msg.facing ?? -1
+        // Debug: log when any movement key is pressed
+        let gk = mp.guestKeys
+        if (gk['KeyA']||gk['KeyD']||gk['ArrowLeft']||gk['ArrowRight']||gk['Space']||gk['ArrowUp']) {
+          console.log('[HOST] guest keys:', JSON.stringify(gk))
+        }
+      }
+    }
+
+    if (msg.type === 'shoot') {
+      console.log('[HOST] received shoot from guest, enemy exists:', !!enemy, 'gameOver:', gameOver)
+      // Host receives shoot request from guest — fire enemy gun
+      if (mp.role === 'host' && enemy && !gameOver) {
+        shoot(enemy, 'enemy')
+      }
+    }
+
+    if (msg.type === 'state') {
+      // Guest receives full game state from host
+      if (mp.role === 'guest') mpApplyState(msg.state)
+    }
+
+    if (msg.type === 'shoot_event') {
+      // Guest receives shoot notification from host
+      if (mp.role === 'guest' && enemy) {
+        shoot(enemy, 'player')  // enemy is the guest's character on guest side
+      }
+    }
+
+    if (msg.type === 'opponent_disconnected') {
+      mpShowOverlay('❌ Opponent disconnected\nRefresh the page')
+      gameOver = true
+    }
+
+    if (msg.type === 'game_over') {
+      if (mp.role === 'guest') {
+        gameOver = true
+        resultEl.textContent = msg.result
+        document.getElementById('retry-btn').style.display = 'none'
+        document.getElementById('menu-btn').style.display = 'none'
+        ui.style.display = 'block'
+      }
+    }
+
+    if (msg.type === 'restart') {
+      if (mp.role === 'guest') {
+        ui.style.display = 'none'
+        document.getElementById('retry-btn').style.display = ''
+        document.getElementById('menu-btn').style.display = ''
+        mp.currentSeed = msg.seed || mp.currentSeed
+        startGame(msg.level, true)
+      }
+    }
+  }
+
+  mp.ws.onclose = () => {
+    if (mp.connected) mpShowOverlay('❌ Connection lost\nRefresh the page')
+  }
+}
+
+function mpShowOverlay(text) {
+  if (!mp.overlay) {
+    mp.overlay = document.createElement('div')
+    mp.overlay.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.75);z-index:50;font-family:monospace;font-size:22px;color:#FFD700;text-align:center;white-space:pre;letter-spacing:2px'
+    document.body.appendChild(mp.overlay)
+  }
+  mp.overlay.textContent = text
+  mp.overlay.style.display = 'flex'
+}
+function mpHideOverlay() {
+  if (mp.overlay) mp.overlay.style.display = 'none'
+}
+
+// Host serialises game state and sends to guest ~20fps
+let _lastParticleCount = 0
+
+function mpSendState() {
+  if (!player || !enemy) return
+  // Collect particles spawned since last snapshot
+  let newParticles = []
+  if (particles.length > _lastParticleCount) {
+    newParticles = particles.slice(_lastParticleCount).map(p=>({
+      x:p.x, y:p.y, dx:p.dx, dy:p.dy, life:p.life, size:p.size, color:p.color, type:p.type
+    }))
+  }
+  _lastParticleCount = particles.length
+  const state = {
+    p:  { x:player.x, y:player.y, vy:player.vy, angle:player.angle, facing:player.facing,
+          lives:player.lives, ammo:player.ammo, reloading:player.reloading, reloadTimer:player.reloadTimer,
+          hasHat:player.hasHat, dead:player.dead, deadAngle:player.deadAngle, invincible:player.invincible,
+          moving:player.moving, walkFrame:player.walkFrame,
+          deadVy:player.deadVy, deadBounced:player.deadBounced, deadDriftX:player.deadDriftX, deadTargetAngle:player.deadTargetAngle,
+          hairStyle:player.hairStyle, P:player.P },
+    e:  { x:enemy.x,  y:enemy.y,  vy:enemy.vy,  angle:enemy.angle,  facing:enemy.facing,
+          lives:enemy.lives,  ammo:enemy.ammo,  reloading:enemy.reloading, reloadTimer:enemy.reloadTimer,
+          hasHat:enemy.hasHat, dead:enemy.dead, deadAngle:enemy.deadAngle, invincible:enemy.invincible,
+          moving:enemy.moving, walkFrame:enemy.walkFrame,
+          deadVy:enemy.deadVy, deadBounced:enemy.deadBounced, deadDriftX:enemy.deadDriftX, deadTargetAngle:enemy.deadTargetAngle,
+          hairStyle:enemy.hairStyle, P:enemy.P },
+    bullets: bullets.map(b=>({x:b.x,y:b.y,dx:b.dx,dy:b.dy,owner:b.owner,trail:b.trail.slice()})),
+    flyingHats: flyingHats.map(h=>({x:h.x,y:h.y,dx:h.dx,dy:h.dy,spin:h.spin})),
+    flyingGuns: flyingGuns.map(g=>({x:g.x,y:g.y,spin:g.spin})),
+    go: gameOver, ts: timeScale, se: slowEnergy,
+    particles: newParticles
+  }
+  mp.ws.send(JSON.stringify({ type:'state', state }))
+}
+
+function mpApplyState(s) {
+  if (!player || !enemy) return
+
+  // Player (host's character): apply fully, but once dead keep ragdoll local
+  let wasPlayerDead = player.dead
+  let savedP = wasPlayerDead ? {x:player.x,y:player.y,deadVy:player.deadVy,deadAngle:player.deadAngle,deadBounced:player.deadBounced,deadDriftX:player.deadDriftX} : null
+  Object.assign(player, s.p)
+  if (wasPlayerDead && player.dead && savedP) {
+    player.x=savedP.x; player.y=savedP.y
+    player.deadVy=savedP.deadVy; player.deadAngle=savedP.deadAngle
+    player.deadBounced=savedP.deadBounced; player.deadDriftX=savedP.deadDriftX
+  }
+
+  // Enemy (guest's character): preserve angle/facing + ragdoll once dead
+  let localAngle = enemy.angle, localFacing = enemy.facing
+  let wasEnemyDead = enemy.dead
+  let savedE = wasEnemyDead ? {x:enemy.x,y:enemy.y,deadVy:enemy.deadVy,deadAngle:enemy.deadAngle,deadBounced:enemy.deadBounced,deadDriftX:enemy.deadDriftX} : null
+  Object.assign(enemy, s.e)
+  enemy.angle = localAngle
+  enemy.facing = localFacing
+  if (wasEnemyDead && enemy.dead && savedE) {
+    enemy.x=savedE.x; enemy.y=savedE.y
+    enemy.deadVy=savedE.deadVy; enemy.deadAngle=savedE.deadAngle
+    enemy.deadBounced=savedE.deadBounced; enemy.deadDriftX=savedE.deadDriftX
+  }
+
+  gameOver = s.go
+  timeScale = s.ts
+  slowEnergy = s.se
+
+  // Sync bullets
+  bullets = s.bullets.map(b => {
+    let bl = new Bullet(b.x, b.y, 0, b.owner)
+    bl.dx = b.dx; bl.dy = b.dy
+    bl.trail = b.trail || []
+    return bl
+  })
+
+  // Sync new particles from host
+  if (s.particles) {
+    for (let sp of s.particles) {
+      let p = new Particle(sp.x, sp.y, sp.type || 'spark', sp.color)
+      p.dx = sp.dx; p.dy = sp.dy; p.life = sp.life; p.size = sp.size
+      particles.push(p)
+    }
+  }
+}
+
+// Guest sends inputs to host ~30fps
+let mpInputInterval = null
+function mpStartSendingInputs() {
+  if (mpInputInterval) clearInterval(mpInputInterval)
+  console.log('[GUEST] starting to send inputs')
+  mpInputInterval = setInterval(() => {
+    if (!mp.ws || mp.ws.readyState !== 1) return
+    const payload = {
+      type: 'input',
+      keys: {...keys},
+      angle: enemy?.angle ?? 0,
+      facing: enemy?.facing ?? -1
+    }
+    // Debug: log when sending movement keys
+    if (keys['KeyA']||keys['KeyD']||keys['ArrowLeft']||keys['ArrowRight']||keys['Space']||keys['ArrowUp']) {
+      console.log('[GUEST] sending keys:', JSON.stringify(keys))
+    }
+    mp.ws.send(JSON.stringify(payload))
+  }, 33)
+}
+
+// Called by host when level starts to tell guest which level
+function mpNotifyLevelStart(level) {
+  if (mp.role === 'host' && mp.ws?.readyState === 1) {
+    mp.ws.send(JSON.stringify({ type: 'start_level', level, seed: mp.currentSeed }))
+    // Begin sending state snapshots
+    if (mp.stateInterval) clearInterval(mp.stateInterval)
+    mp.stateInterval = setInterval(mpSendState, 16)  // ~60fps fallback
+  }
+}
+
+// Auto-connect when page loads
+window.addEventListener('load', () => {
+  // Only connect if served from a real server (not file://)
+  if (location.protocol !== 'file:') {
+    mpConnect()
+  }
+})
+
+// ── INPUT ────────────────────────────────────────────────────
+document.addEventListener('keydown',e=>{keys[e.code]=true})
+document.addEventListener('keyup',  e=>{keys[e.code]=false})
+canvas.addEventListener('mousemove',e=>{
+  // Guest controls enemy (Outlaw), everyone else controls player (Billy)
+  let target = (mp.connected && mp.role === 'guest') ? enemy : player
+  if(!target) return
+  let ax=target.x+(target.facing>0?target.w:0), ay=target.y+30
+  target.angle=Math.atan2(e.clientY-ay, e.clientX-ax)
+  target.facing=e.clientX>target.x+target.w/2?1:-1
+})
+canvas.addEventListener('mousedown',()=>{
+  if(gameOver) return
+  if(mp.connected && mp.role === 'guest') {
+    // Send dedicated shoot message to host
+    if(mp.ws && mp.ws.readyState === 1)
+      mp.ws.send(JSON.stringify({ type: 'shoot' }))
+  } else if(player) {
+    shoot(player,'player')
+  }
+})
+
+// ── CACTUS ───────────────────────────────────────────────────
+function drawCactus(cx,gy,P){
+  ctx.fillStyle='#2d7a22';ctx.fillRect(R(cx-1.5*P),gy-10*P,3*P,10*P)
+  ctx.fillStyle='#1e5518';ctx.fillRect(R(cx+0.5*P),gy-10*P,P,10*P)
+  ctx.fillStyle='#2d7a22';ctx.fillRect(R(cx-4.5*P),gy-7*P,3*P,2*P);ctx.fillRect(R(cx-4.5*P),gy-10*P,2*P,4*P)
+  ctx.fillStyle='#1e5518';ctx.fillRect(R(cx-4.5*P),gy-8*P,P,P)
+  ctx.fillStyle='#2d7a22';ctx.fillRect(R(cx+1.5*P),gy-5*P,3*P,2*P);ctx.fillRect(R(cx+2.5*P),gy-8*P,2*P,4*P)
+  ctx.fillStyle='#1e5518';ctx.fillRect(R(cx+2.5*P),gy-6*P,P,P)
+  ctx.fillStyle='#5dba50';for(let i=1;i<9;i++){ctx.fillRect(R(cx-2*P),gy-i*P,2,2);ctx.fillRect(R(cx+1.5*P),gy-i*P,2,2)}
+}
+
+// ── LAMP POST (level 2) ──────────────────────────────────────
+function drawLampPost(x, gy, glowT){
+  // pole
+  ctx.fillStyle='#aaaacc'
+  ctx.fillRect(x-4,gy-180,8,180)
+  // arm
+  ctx.fillRect(x-4,gy-180,50,8)
+  // lamp housing
+  ctx.fillStyle='#8888aa'
+  ctx.fillRect(x+44,gy-192,16,18)
+  // light glow flicker
+  let g=0.7+0.3*Math.sin(glowT+x*0.1)
+  ctx.globalAlpha=g
+  ctx.fillStyle='#ffffaa'
+  ctx.fillRect(x+46,gy-190,12,14)
+  ctx.globalAlpha=g*0.3
+  ctx.fillStyle='#ffff44'
+  ctx.fillRect(x+36,gy-200,32,32)
+  ctx.globalAlpha=1
+  // neon sign below lamp
+  let neonCols=['#ff2266','#ff8800','#00ffcc','#aa44ff']
+  let nc=neonCols[Math.floor(x/200)%neonCols.length]
+  ctx.fillStyle=nc
+  ctx.globalAlpha=0.7+0.3*Math.sin(glowT*2+x)
+  ctx.fillRect(x-30,gy-140,70,14)
+  ctx.globalAlpha=1
+  // sign text pixels (abstract)
+  ctx.fillStyle='#fff'
+  ctx.globalAlpha=0.5
+  for(let i=0;i<5;i++)ctx.fillRect(x-24+i*12,gy-138,8,10)
+  ctx.globalAlpha=1
+}
+
+// ── NEON BACKGROUND (level 2) ────────────────────────────────
+function drawNeonCity(t){
+  // dark sky
+  let bands=['#040210','#08041a','#0c061e','#10081f','#080616']
+  let bh=H/bands.length
+  bands.forEach((c,i)=>{ctx.fillStyle=c;ctx.fillRect(0,i*bh,W,Math.ceil(bh+1))})
+  // distant buildings
+  let buildings=[[0,0.35,0.08],[0.06,0.25,0.07],[0.12,0.38,0.09],[0.2,0.28,0.06],[0.26,0.42,0.1],[0.34,0.32,0.08],[0.42,0.22,0.07],[0.48,0.36,0.09],[0.56,0.28,0.08],[0.63,0.4,0.1],[0.72,0.25,0.07],[0.78,0.35,0.08],[0.85,0.3,0.09],[0.92,0.38,0.07]]
+  for(let [xf,hf,wf] of buildings){
+    ctx.fillStyle='#0a0818'
+    let bx=xf*W,bw=wf*W,by=H*(1-hf)-GROUND*0.1,bh2=H*hf
+    ctx.fillRect(bx,by,bw,bh2)
+    // windows flicker
+    for(let wy=by+8;wy<GROUND-20;wy+=14){
+      for(let wx=bx+4;wx<bx+bw-4;wx+=10){
+        if(Math.random()<0.004) continue // flicker off
+        let on=Math.sin(t*0.5+wx*0.3+wy*0.2)>-0.5
+        if(on){ctx.fillStyle='rgba(255,220,100,0.6)';ctx.fillRect(wx,wy,6,8)}
+      }
+    }
+  }
+  // neon reflections on wet ground
+  ctx.globalAlpha=0.12
+  ctx.fillStyle='#ff2266';ctx.fillRect(0,GROUND-8,W,8)
+  ctx.fillStyle='#00ffcc';ctx.fillRect(0,GROUND-4,W,4)
+  ctx.globalAlpha=1
+  // ground — wet asphalt
+  ctx.fillStyle='#0a0814';ctx.fillRect(0,GROUND,W,H-GROUND)
+  // lane lines
+  ctx.fillStyle='#ffffff'
+  ctx.globalAlpha=0.1
+  for(let gx=0;gx<W;gx+=60) ctx.fillRect(gx,GROUND+6,30,4)
+  ctx.globalAlpha=1
+  // lamp posts with obstacles built in
+  let posts=[W*0.18,W*0.38,W*0.62,W*0.82]
+  for(let lx of posts) drawLampPost(lx,GROUND,t)
+}
+
+// ── MARS BACKGROUND ──────────────────────────────────────────
+function drawMars(t){
+  // mars sky gradient
+  let bands=['#1a0505','#2d0a08','#3d1008','#4a1408','#5a1a0a']
+  let bh=H/bands.length
+  bands.forEach((c,i)=>{ctx.fillStyle=c;ctx.fillRect(0,i*bh,W,Math.ceil(bh+1))})
+  // distant mars stars (reddish tint)
+  for(let s of marsStars){
+    ctx.globalAlpha=0.3+0.5*Math.abs(Math.sin(t+s.b*8))
+    ctx.fillStyle=s.b>0.7?'#ffaaaa':'#ffffff'
+    ctx.fillRect(R(s.x),R(s.y),s.s,s.s)
+  }
+  ctx.globalAlpha=1
+  // two moons of mars
+  for(let [mx,my,mr,col] of [[W*0.15,60,12,'#cc9988'],[W*0.72,40,8,'#bbaaaa']]){
+    ctx.fillStyle=col
+    for(let dy=-mr;dy<=mr;dy+=2) for(let dx=-mr;dx<=mr;dx+=2)
+      if(dx*dx+dy*dy<=mr*mr) ctx.fillRect(R(mx+dx),R(my+dy),2,2)
+  }
+  // rock formations (silhouette)
+  ctx.fillStyle='#2a0a06'
+  let rocks=[[0,.75],[.05,.6],[.1,.72],[.18,.55],[.25,.68],[.33,.5],[.42,.65],[.52,.52],[.6,.67],[.7,.56],[.78,.7],[.88,.58],[.94,.65],[1,.72],[1,1],[0,1]]
+  ctx.beginPath();rocks.forEach(([xf,yf],i)=>{let px=xf*W,py=yf*H;i?ctx.lineTo(px,py):ctx.moveTo(px,py)});ctx.closePath();ctx.fill()
+  // mars ground — red dust
+  ctx.fillStyle='#5a1a0a';ctx.fillRect(0,GROUND,W,H-GROUND)
+  ctx.fillStyle='#6b2010'
+  for(let gx=0;gx<W;gx+=8){
+    let j=Math.floor(Math.sin(gx*0.15)*3)
+    ctx.fillRect(gx,GROUND-3+j,8,6)
+  }
+  // dust swirls
+  ctx.globalAlpha=0.06
+  ctx.fillStyle='#ff4422'
+  for(let [dx,dy,dr] of [[W*0.3,GROUND-20,40],[W*0.65,GROUND-15,30],[W*0.5,GROUND-25,50]]){
+    for(let a=0;a<Math.PI*2;a+=0.5){
+      ctx.fillRect(R(dx+Math.cos(a+t*0.5)*dr),R(dy+Math.sin(a+t*0.3)*8),4,4)
+    }
+  }
+  ctx.globalAlpha=1
+  // red dust rocks
+  for(let [rx,ry,rw,rh] of [[120,GROUND+14,36,16],[450,GROUND+10,24,12],[820,GROUND+18,42,18]]){
+    ctx.fillStyle='#8b2510';ctx.fillRect(rx,ry,rw,rh)
+    ctx.fillStyle='#6b1a08';ctx.fillRect(rx+2,ry+2,rw-4,rh-4)
+  }
+}
+
+// ── LEVEL 1 BG ───────────────────────────────────────────────
+function drawWildWest(){
+  let bands=['#0d0820','#1a1035','#2a1a50','#3a2560','#4a3070']
+  let bh=H/bands.length
+  bands.forEach((c,i)=>{ctx.fillStyle=c;ctx.fillRect(0,i*bh,W,Math.ceil(bh+1))})
+  let t=Date.now()*0.002
+  for(let s of stars){ctx.globalAlpha=0.4+0.6*Math.abs(Math.sin(t+s.b*10));ctx.fillStyle='#fff';ctx.fillRect(R(s.x),R(s.y),s.s,s.s)}
+  ctx.globalAlpha=1
+  let mx=W*0.82,my=78
+  ctx.fillStyle='#e8e0a0'
+  for(let dy=-20;dy<=20;dy+=2) for(let dx=-20;dx<=20;dx+=2)
+    if(dx*dx+dy*dy<=400) ctx.fillRect(R(mx+dx),R(my+dy),2,2)
+  for(let [cx2,cy2,cr] of [[6,-8,6],[-5,4,4],[8,10,3]]){
+    ctx.fillStyle='#c8c090'
+    for(let dy=-cr;dy<=cr;dy+=2) for(let dx=-cr;dx<=cr;dx+=2)
+      if(dx*dx+dy*dy<=cr*cr) ctx.fillRect(R(mx+cx2+dx),R(my+cy2+dy),2,2)
+  }
+  ctx.fillStyle='#1a1030'
+  let pts=[[0,.7],[.05,.55],[.12,.65],[.2,.45],[.28,.6],[.35,.42],[.45,.58],[.55,.4],[.65,.55],[.75,.48],[.85,.6],[.95,.5],[1,.65],[1,1],[0,1]]
+  ctx.beginPath();pts.forEach(([xf,yf],i)=>{let px=xf*W,py=yf*H;i?ctx.lineTo(px,py):ctx.moveTo(px,py)});ctx.closePath();ctx.fill()
+  ctx.fillStyle='#3d2510';ctx.fillRect(0,GROUND,W,H-GROUND)
+  for(let gx=0;gx<W;gx+=8){let j=Math.floor(Math.sin(gx*0.2)*2);ctx.fillStyle=gx%16===0?'#3a6b20':'#2d5218';ctx.fillRect(gx,GROUND-4+j,8,8)}
+  for(let [rx,ry,rw,rh] of [[160,GROUND+18,28,12],[510,GROUND+14,20,10],[870,GROUND+22,32,14]]){
+    ctx.fillStyle='#5a4030';ctx.fillRect(rx,ry,rw,rh);ctx.fillStyle='#4a3020';ctx.fillRect(rx+2,ry+2,rw-4,rh-4)
+  }
+  drawCactus(W*0.22,GROUND,12);drawCactus(W*0.50,GROUND,18);drawCactus(W*0.78,GROUND,15)
+}
+
+// ── HUD ──────────────────────────────────────────────────────
+function drawHeart(x,y,filled){
+  const S=5
+  ctx.fillStyle=filled?'#ff2244':'#2a2a2a'
+  ctx.fillRect(x+S,y,2*S,S);ctx.fillRect(x+4*S,y,2*S,S)
+  ctx.fillRect(x,y+S,7*S,S);ctx.fillRect(x,y+2*S,7*S,S)
+  ctx.fillRect(x+S,y+3*S,5*S,S);ctx.fillRect(x+2*S,y+4*S,3*S,S);ctx.fillRect(x+3*S,y+5*S,S,S)
+  if(filled){ctx.fillStyle='rgba(255,150,170,0.5)';ctx.fillRect(x+S,y+S,2*S,S)}
+}
+function drawHUD(){
+  // ── PLAYER side (left) ──────────────────────────────────────
+  ctx.font='bold 22px monospace'
+  ctx.fillStyle='#FFD700'
+  ctx.fillText(playerName,20,32)
+  for(let i=0;i<3;i++) drawHeart(20+i*42,45,i<player.lives)
+  for(let i=0;i<6;i++){let f=i<player.ammo;ctx.fillStyle=f?'#FFD700':'#333';ctx.fillRect(20+i*16,90,10,20);if(f){ctx.fillStyle='#fff';ctx.fillRect(22+i*16,92,6,4)}}
+  if(player.reloading){ctx.fillStyle='#aaa';ctx.font='bold 9px monospace';ctx.fillText('RELOADING...',20,118);ctx.fillStyle='#333';ctx.fillRect(20,122,96,6);ctx.fillStyle='#FFD700';ctx.fillRect(20,122,R(96*(1-player.reloadTimer/60)),6)}
+
+  // ── ENEMY side (right-aligned) ───────────────────────────────
+  const RE=W-20   // common right edge
+  ctx.font='bold 22px monospace'
+  ctx.fillStyle='#ff4422'
+  ctx.textAlign='right'
+  ctx.fillText(enemyName,RE,32)
+  ctx.textAlign='left'
+  // hearts: rightmost heart's right edge = RE → its x = RE - heartWidth(35)
+  for(let i=0;i<3;i++) drawHeart(RE-35-(2-i)*42,45,i<enemy.lives)
+  // ammo right-aligned
+  for(let i=0;i<6;i++){let f=i<enemy.ammo;ctx.fillStyle=f?'#ff4422':'#333';ctx.fillRect(W-116+i*16,90,10,20);if(f){ctx.fillStyle='#fff';ctx.fillRect(W-114+i*16,92,6,4)}}
+  if(enemy.reloading){ctx.fillStyle='#aaa';ctx.font='bold 9px monospace';ctx.fillText('RELOADING',W-116,118);ctx.fillStyle='#333';ctx.fillRect(W-116,122,96,6);ctx.fillStyle='#ff4422';ctx.fillRect(W-116,122,R(96*(1-enemy.reloadTimer/60)),6)}
+
+  // ── SLOWMO bar (centre, raised 50px from previous) ───────────
+  let barY=64
+  ctx.fillStyle='#1a1a2a';ctx.fillRect(W/2-85,barY,170,14)
+  ctx.fillStyle=isSlowmo?'#ffff00':'#00eeff';ctx.fillRect(W/2-83,barY+2,R(166*slowEnergy),10)
+  ctx.fillStyle=isSlowmo?'#ffff00':'#888';ctx.font='bold 9px monospace'
+  ctx.fillText('JUMP/[E] SLOW',W/2-42,barY+24)
+}
+
+// ── COLLISION ────────────────────────────────────────────────
+function rectHit(b,p){return b.x>p.x&&b.x<p.x+p.w&&b.y>p.y&&b.y<p.y+p.h}
+function bHit(a,b){let dx=a.x-b.x,dy=a.y-b.y;return dx*dx+dy*dy<(a.r+b.r)*(a.r+b.r)}
+
+// ── SLOWMO ───────────────────────────────────────────────────
+function updateSlowmo(dt){
+  let active = keys['KeyE'] || !player.onGround
+  if (mp.connected && mp.role === 'host' && enemy) {
+    active = active || mp.guestKeys['KeyE'] || !enemy.onGround
+  }
+  if(active&&slowEnergy>0){isSlowmo=true;slowEnergy=Math.max(0,slowEnergy-SLOW_DRAIN*dt);timeScale=SLOW_SCALE}
+  else{isSlowmo=false;slowEnergy=Math.min(1,slowEnergy+SLOW_REFILL*dt);timeScale=1}
+  if(slowEnergy<=0){isSlowmo=false;timeScale=1}
+  let target=isSlowmo?1:0
+  slowmoGlowAlpha+=(target-slowmoGlowAlpha)*0.08*dt
+  if(slowmoGlowAlpha<0.005) slowmoGlowAlpha=0
+}
+
+function takeHit(p,isPlayer,bulletDx){
+  if(p.invincible>0)return
+  p.lives--;p.invincible=70
+  let cx=p.x+p.w/2,cy=p.y+p.h/2
+  // blood burst particles
+  for(let i=0;i<28;i++){
+    let bp=new Particle(cx,cy,'death')
+    bp.color=Math.random()<0.5?'#cc0011':Math.random()<0.6?'#ff0022':'#990011'
+    bp.size=1+Math.random()*5
+    bp.life=1
+    bp.dx += -bulletDx*(0.5+Math.random()*3)
+    particles.push(bp)
+  }
+  // blood drops settling on surfaces
+  let dropCount=p.lives<=0?22:12
+  for(let i=0;i<dropCount;i++) bloodDrops.push(new BloodDrop(cx,cy,bulletDx>0?1:-1))
+  if(p.lives<=0){
+    p.dead=true
+    p.deadVy=-6
+    p.deadBounced=false
+    p.deadDriftX=0
+    p.deadTargetAngle=(bulletDx>0?1:-1)*Math.PI/2
+    p.deadAngle=0
+    let gt=p.gunTip()
+    flyingGuns.push(new FlyingGun(gt.x, gt.y, bulletDx>0?1:-1))
+    setTimeout(()=>endGame(isPlayer?'DEFEAT':'VICTORY'), 1400)
+  }
+}
+
+// ── MAIN LOOP ────────────────────────────────────────────────
+let lastTime=performance.now()
+let glowT=0
+
+function loop(now){
+  let dt=Math.min((now-lastTime)/16.67,3); lastTime=now
+  glowT+=dt*0.05
+
+  updateSlowmo(dt)
+
+  // draw bg per level
+  if(currentLevel===1) drawWildWest()
+  else if(currentLevel===2) drawNeonCity(glowT)
+  else if(currentLevel===3) drawMars(glowT)
+
+  // level-specific animated elements
+  if(currentLevel===1){ for(let c of clouds){c.update(dt);c.draw()} }
+  if(currentLevel===3){ for(let a of aliens){a.update(dt);a.draw()} }
+
+  if (mp.connected && mp.role === 'guest') {
+    // Guest: no position prediction — position comes from host snapshots
+    // Only update bullets/particles locally for smooth rendering between snapshots
+    for(let b of bullets) b.update(dt)
+    for(let p of particles) p.update(dt)
+    particles = particles.filter(p=>p.life>0)
+    for(let h of flyingHats) h.update(dt)
+    for(let g of flyingGuns) g.update(dt)
+  } else {
+    // Host (or single player): run full physics
+    // MP host: apply guest inputs to enemy instead of AI
+    if (mp.connected && mp.role === 'host' && enemy) {
+      enemy.angle  = mp.guestAngle
+      enemy.facing = mp.guestFacing
+      if (!enemy.dead) {
+        let gk = mp.guestKeys
+        enemy.moving = false
+        if (gk['KeyA']||gk['ArrowLeft'])  { enemy.x -= 4*dt*timeScale; enemy.moving = true }
+        if (gk['KeyD']||gk['ArrowRight']) { enemy.x += 4*dt*timeScale; enemy.moving = true }
+        if ((gk['Space']||gk['ArrowUp']) && enemy.onGround) { enemy.vy = -13; enemy.onGround = false }
+        if (enemy.moving){ enemy.walkTimer+=dt*timeScale; enemy.walkFrame=enemy.walkTimer*0.2 }
+        enemy.vy+=0.65*dt*timeScale; enemy.y+=enemy.vy*dt*timeScale
+        if(enemy.y>=SPRITE_GROUND){enemy.y=SPRITE_GROUND;enemy.vy=0;enemy.onGround=true}
+        enemy.x=Math.max(0,Math.min(W-enemy.w,enemy.x))
+        if(enemy.invincible>0) enemy.invincible-=dt*timeScale
+        if(enemy.reloading){enemy.reloadTimer-=dt;if(enemy.reloadTimer<=0){enemy.ammo=enemy.maxAmmo;enemy.reloading=false}}
+        if(enemy.ammo<=0&&!enemy.reloading){enemy.reloading=true;enemy.reloadTimer=60}
+      }
+    } else {
+      // single player: normal update + AI
+      if(!enemy.dead) enemy.update(dt)
+      if(!gameOver && !enemy.dead) enemy.updateAI(dt,player)
+    }
+
+    // always update player
+    if(!player.dead) player.update(dt)
+
+  let dead=new Set()
+  for(let i=0;i<bullets.length;i++){
+    if(dead.has(i))continue
+    for(let j=i+1;j<bullets.length;j++){
+      if(dead.has(j))continue
+      if(bullets[i].owner!==bullets[j].owner&&bHit(bullets[i],bullets[j])){
+        dead.add(i);dead.add(j)
+        let mx=(bullets[i].x+bullets[j].x)/2,my=(bullets[i].y+bullets[j].y)/2
+        for(let k=0;k<10;k++)particles.push(new Particle(mx,my,'spark'))
+        flashes.push(new Flash(mx,my,'#ffffff'))
+      }
+    }
+  }
+  bullets=bullets.filter((b,idx)=>{
+    if(dead.has(idx))return false
+    b.update(dt)
+    if(!gameOver){
+      // hat hit check — hat zone: above py, roughly crown area
+      if(b.owner!=='player'&&player.hasHat){
+        let hp=player, hx=hp.x, hy=hp.y
+        if(b.x>hx&&b.x<hx+hp.w&&b.y>hy-18&&b.y<hy+2){
+          player.hasHat=false
+          flyingHats.push(new FlyingHat(hx,hy-14,player.P,b.dx))
+          for(let k=0;k<6;k++)particles.push(new Particle(hx+16,hy-8,'spark','#FFD700'))
+          return false
+        }
+      }
+      if(b.owner!=='enemy'&&enemy.hasHat){
+        let hp=enemy, hx=hp.x, hy=hp.y
+        if(b.x>hx&&b.x<hx+hp.w&&b.y>hy-18&&b.y<hy+2){
+          enemy.hasHat=false
+          flyingHats.push(new FlyingHat(hx,hy-14,enemy.P,b.dx))
+          for(let k=0;k<6;k++)particles.push(new Particle(hx+16,hy-8,'spark','#cc4444'))
+          return false
+        }
+      }
+      if(b.owner!=='player'&&rectHit(b,player)){takeHit(player,true,b.dx);return false}
+      if(b.owner!=='enemy' &&rectHit(b,enemy)) {takeHit(enemy,false,b.dx);return false}
+    }
+    return true
+  })
+  } // end host-only physics block
+
+  // Host: send state every frame for minimal latency
+  if (mp.connected && mp.role === 'host') mpSendState()
+
+  if (mp.connected && mp.role === 'guest') {
+    // already updated in prediction block above — just draw
+    particles = particles.filter(p=>{p.draw();return p.life>0})
+    flashes   = flashes  .filter(f=>{f.update(dt);f.draw();return f.life>0})
+    flyingHats.forEach(h=>h.draw())
+    flyingGuns.forEach(g=>g.draw())
+  } else {
+    particles=particles.filter(p=>{p.update(dt);p.draw();return p.life>0})
+    flashes  =flashes  .filter(f=>{f.update(dt);f.draw();return f.life>0})
+    flyingHats.forEach(h=>{h.update(dt);h.draw()})
+    flyingGuns.forEach(g=>{g.update(dt);g.draw()})
+  }
+  // ragdoll physics — run on both host and guest locally
+  if(player&&player.dead) player.updateRagdoll(dt)
+  if(enemy &&enemy.dead)  enemy.updateRagdoll(dt)
+  enemy.draw();player.draw()
+  if(slowmoGlowAlpha>0) for(let b of bullets) b.drawSlowmoHalo()
+  for(let b of bullets)b.draw()
+  drawBloodStains()
+  bloodDrops=bloodDrops.filter(b=>{b.update(dt);if(!b.settled){b.draw();return true}return false})
+
+  if(isSlowmo){ctx.strokeStyle='rgba(0,220,255,0.25)';ctx.lineWidth=8;ctx.strokeRect(4,4,W-8,H-8)}
+  drawHUD()
+  requestAnimationFrame(loop)
+}
+
+// ── START LEVEL ──────────────────────────────────────────────
+function startGame(level, isRetry=false, skipNetSync=false){
+  currentLevel=level
+  levelSel.style.display='none'
+  bullets=[];particles=[];flashes=[];obstacles=[];clouds=[];aliens=[];flyingHats=[];flyingGuns=[];bloodDrops=[];bloodStains=[]
+  _lastParticleCount = 0
+  timeScale=1;slowEnergy=1;isSlowmo=false;gameOver=false;slowmoGlowAlpha=0
+
+  if(!isRetry){
+    // Host generates seed; guest receives it via start_level message before startGame is called
+    if(!mp.connected || mp.role === 'host'){
+      mp.currentSeed = Math.floor(Math.random() * 0xFFFFFFFF)
+    }
+    seedRng(mp.currentSeed || 12345)
+    randomisePalettes()
+    playerName=PLAYER_NAMES[Math.floor(seededRand()*PLAYER_NAMES.length)]
+    enemyName=ENEMY_NAMES[Math.floor(seededRand()*ENEMY_NAMES.length)]
+    // hairStyle is picked inside Player/Enemy constructor via seededRand — RNG state continues here
+  }
+
+  player=new Player(150,   1, playerPalette)
+  enemy =new Enemy(W-200, -1, enemyPalette)
+
+  if(level===1){
+    clouds=[
+      new Cloud(120, 200, 90,  45, 0.25),
+      new Cloud(420, 300, 70,  35, 0.15),
+      new Cloud(720, 230, 110, 50, 0.20),
+      new Cloud(1050,340, 80,  38, 0.18),
+      new Cloud(300, 280, 65,  32, 0.22),
+      new Cloud(900, 260, 95,  42, 0.12),
+    ]
+  }
+
+  if(level===2){
+    let posts=[W*0.18,W*0.38,W*0.62,W*0.82]
+    for(let lx of posts){
+      obstacles.push({x:lx-4,y:GROUND-180,w:54,h:8})
+      obstacles.push({x:lx+44,y:GROUND-192,w:16,h:18})
+    }
+  }
+
+  if(level===3){
+    let alienData=[[W*0.2,H*0.38,0.8],[W*0.55,H*0.44,-0.6],[W*0.75,H*0.36,0.5],[W*0.35,H*0.50,-0.7]]
+    for(let [ax,ay,spd] of alienData){
+      let a=new Alien(ax,ay,spd)
+      a.obs={x:ax,y:ay,w:120,h:60}
+      obstacles.push(a.obs)
+      aliens.push(a)
+    }
+  }
+
+  // MP: host tells guest to start, guest starts sending inputs
+  if (mp.connected && !skipNetSync) {
+    if (mp.role === 'host') mpNotifyLevelStart(level)
+    if (mp.role === 'guest') mpStartSendingInputs()
+  }
+
+  lastTime=performance.now()
+  requestAnimationFrame(loop)
+}
+
+function restartLevel(){
+  ui.style.display='none'
+  // In MP: host sends restart signal to guest
+  if(mp.connected && mp.role==='host' && mp.ws?.readyState===1){
+    mp.ws.send(JSON.stringify({type:'restart', level: currentLevel, seed: mp.currentSeed}))
+  }
+  startGame(currentLevel, true)
+}
+function endGame(text){
+  if(gameOver)return;gameOver=true
+  if(player&&enemy&&player.dead&&enemy.dead) text='DEAD HEAT'
+  resultEl.textContent=text;ui.style.display='block'
+  if(mp.connected && mp.role==='host' && mp.ws?.readyState===1){
+    let guestResult = text==='DEAD HEAT' ? 'DEAD HEAT' : (text==='VICTORY' ? 'DEFEAT' : 'VICTORY')
+    mp.ws.send(JSON.stringify({type:'game_over', result: guestResult}))
+  }
+}
+
+// ── LEVEL PREVIEW THUMBNAILS ──────────────────────────────────
+function drawPreviews(){
+  // Preview 1 — Wild West
+  ;(()=>{
+    const c=document.getElementById('prev1'),x=c.getContext('2d'),W2=200,H2=120,G=90
+    const bands=['#0d0820','#1a1035','#2a1a50','#3a2560','#4a3070']
+    bands.forEach((col,i)=>{x.fillStyle=col;x.fillRect(0,i*H2/5,W2,H2/5+1)})
+    x.fillStyle='#e8e0a0';for(let dy=-8;dy<=8;dy+=1)for(let dx=-8;dx<=8;dx+=1)if(dx*dx+dy*dy<=64)x.fillRect(162+dx,20+dy,1,1)
+    x.fillStyle='#1a1030';x.beginPath();[[0,.7],[.3,.45],[.6,.4],[1,.65],[1,1],[0,1]].forEach(([xf,yf],i)=>{i?x.lineTo(xf*W2,yf*H2):x.moveTo(xf*W2,yf*H2)});x.closePath();x.fill()
+    x.fillStyle='#3d2510';x.fillRect(0,G,W2,H2-G)
+    x.fillStyle='#3a6b20';x.fillRect(0,G-3,W2,5)
+    // mini cactus
+    x.fillStyle='#2d7a22';x.fillRect(95,G-28,6,28);x.fillRect(80,G-20,15,4);x.fillRect(96,G-16,14,4)
+    // cloud
+    x.fillStyle='rgba(230,230,210,0.85)';x.beginPath();x.ellipse(50,30,30,14,0,0,Math.PI*2);x.fill()
+  })()
+
+  // Preview 2 — Neon City
+  ;(()=>{
+    const c=document.getElementById('prev2'),x=c.getContext('2d'),W2=200,H2=120,G=88
+    x.fillStyle='#040210';x.fillRect(0,0,W2,H2)
+    // buildings
+    for(let [bx,bh2,bw2] of [[0,60,30],[30,45,25],[55,70,35],[90,50,28],[118,65,32],[150,48,24],[174,55,26]]){
+      x.fillStyle='#0a0818';x.fillRect(bx,H2-G*0.6-bh2/2,bw2,bh2)
+      x.fillStyle='rgba(255,220,80,0.4)';for(let wy=H2-G*0.6-bh2/2+4;wy<G-10;wy+=8)for(let wx=bx+3;wx<bx+bw2-3;wx+=7){if(Math.random()>0.4)x.fillRect(wx,wy,4,5)}
+    }
+    x.fillStyle='#0a0814';x.fillRect(0,G,W2,H2-G)
+    // lamp post mini
+    x.fillStyle='#aaaacc';x.fillRect(38,G-55,3,55);x.fillRect(38,G-55,20,3)
+    x.fillStyle='rgba(255,255,100,0.8)';x.fillRect(56,G-60,8,7)
+    x.fillStyle='#ff2266';x.fillRect(14,G-38,28,6);x.fillStyle='#00ffcc';x.fillRect(120,G-45,30,6)
+    x.globalAlpha=0.12;x.fillStyle='#ff2266';x.fillRect(0,G-4,W2,4);x.globalAlpha=1
+  })()
+
+  // Preview 3 — Mars
+  ;(()=>{
+    const c=document.getElementById('prev3'),x=c.getContext('2d'),W2=200,H2=120,G=90
+    const bands=['#1a0505','#2d0a08','#3d1008','#4a1408','#5a1a0a']
+    bands.forEach((col,i)=>{x.fillStyle=col;x.fillRect(0,i*H2/5,W2,H2/5+1)})
+    x.fillStyle='#2a0a06';x.beginPath();[[0,.72],[.15,.55],[.35,.5],[.6,.55],[.85,.5],[1,.65],[1,1],[0,1]].forEach(([xf,yf],i)=>{i?x.lineTo(xf*W2,yf*H2):x.moveTo(xf*W2,yf*H2)});x.closePath();x.fill()
+    x.fillStyle='#5a1a0a';x.fillRect(0,G,W2,H2-G)
+    x.fillStyle='#6b2010';x.fillRect(0,G-2,W2,4)
+    // alien saucer mini
+    x.fillStyle='#44ee88';x.fillRect(70,22,50,10);x.fillRect(80,15,30,10)
+    x.fillStyle='#ff4466';x.fillRect(76,24,6,5);x.fillStyle='#ffdd00';x.fillRect(87,24,6,5);x.fillStyle='#44aaff';x.fillRect(98,24,6,5)
+    // moon
+    x.fillStyle='#cc9988';for(let dy=-6;dy<=6;dy+=1)for(let dx=-6;dx<=6;dx+=1)if(dx*dx+dy*dy<=36)x.fillRect(30+dx,18+dy,1,1)
+  })()
+}
+
+drawPreviews()
+</script>
+</body>
+</html>
