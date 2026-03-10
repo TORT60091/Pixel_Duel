@@ -6,7 +6,7 @@
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
 body { overflow:hidden; background:#0d0820; }
-canvas { display:block; }
+canvas { display:block; cursor:none; }
 
 /* ── LEVEL SELECT ── */
 #level-select {
@@ -902,10 +902,8 @@ let mp = {
   stateInterval: null, overlay: null
 }
 
-function mpConnect() {
-  // Determine WS URL from current page URL
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  const wsUrl = `${proto}://${location.host}`
+function mpConnect(serverUrl) {
+  const wsUrl = serverUrl.replace(/^http/, 'ws').replace(/\/$/, '')
   mp.ws = new WebSocket(wsUrl)
 
   mp.ws.onopen = () => {
@@ -1044,8 +1042,8 @@ function mpSendState() {
           deadVy:enemy.deadVy, deadBounced:enemy.deadBounced, deadDriftX:enemy.deadDriftX, deadTargetAngle:enemy.deadTargetAngle,
           hairStyle:enemy.hairStyle, P:enemy.P },
     bullets: bullets.map(b=>({x:b.x,y:b.y,dx:b.dx,dy:b.dy,owner:b.owner,trail:b.trail.slice()})),
-    flyingHats: flyingHats.map(h=>({x:h.x,y:h.y,dx:h.dx,dy:h.dy,spin:h.spin})),
-    flyingGuns: flyingGuns.map(g=>({x:g.x,y:g.y,spin:g.spin})),
+    flyingHats: flyingHats.map(h=>({x:h.x,y:h.y,dx:h.dx,dy:h.dy,spin:h.spin,P:h.P,onGround:h.onGround,spinSpeed:h.spinSpeed})),
+    flyingGuns: flyingGuns.map(g=>({x:g.x,y:g.y,dx:g.dx,dy:g.dy,spin:g.spin,spinSpeed:g.spinSpeed})),
     go: gameOver, ts: timeScale, se: slowEnergy,
     particles: newParticles
   }
@@ -1090,6 +1088,25 @@ function mpApplyState(s) {
     return bl
   })
 
+  // Sync flyingHats — rebuild from snapshot so guest sees hat fall
+  if (s.flyingHats) {
+    flyingHats = s.flyingHats.map(h => {
+      let fh = new FlyingHat(h.x, h.y, h.P || {}, 0)
+      fh.dx=h.dx; fh.dy=h.dy; fh.spin=h.spin
+      fh.spinSpeed=h.spinSpeed||0; fh.onGround=h.onGround||false
+      return fh
+    })
+  }
+
+  // Sync flyingGuns
+  if (s.flyingGuns) {
+    flyingGuns = s.flyingGuns.map(g => {
+      let fg = new FlyingGun(g.x, g.y, 1)
+      fg.dx=g.dx||0; fg.dy=g.dy||0; fg.spin=g.spin||0; fg.spinSpeed=g.spinSpeed||0
+      return fg
+    })
+  }
+
   // Sync new particles from host
   if (s.particles) {
     for (let sp of s.particles) {
@@ -1131,18 +1148,40 @@ function mpNotifyLevelStart(level) {
   }
 }
 
-// Auto-connect when page loads
+// Show server URL input on load
 window.addEventListener('load', () => {
-  // Only connect if served from a real server (not file://)
-  if (location.protocol !== 'file:') {
-    mpConnect()
+  const saved = localStorage.getItem('mp_server_url') || ''
+  const div = document.createElement('div')
+  div.id = 'url-prompt'
+  div.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,0.88);z-index:60;font-family:monospace;color:#FFD700;gap:16px'
+  div.innerHTML = `
+    <div style="font-size:20px;letter-spacing:2px">🔫 GUN DUEL — MULTIPLAYER</div>
+    <div style="font-size:13px;color:#aaa">Enter Railway server URL</div>
+    <input id="srv-url" type="text" value="${saved}" placeholder="https://yourapp.railway.app"
+      style="width:340px;padding:10px;font-size:14px;font-family:monospace;background:#1a1a2a;color:#fff;border:2px solid #FFD700;outline:none;text-align:center"/>
+    <button id="srv-connect" style="padding:10px 32px;font-size:16px;font-family:monospace;background:#FFD700;color:#000;border:none;cursor:pointer;letter-spacing:2px">CONNECT</button>
+    <div id="srv-err" style="font-size:12px;color:#ff4422;min-height:16px"></div>
+  `
+  document.body.appendChild(div)
+
+  document.getElementById('srv-connect').onclick = () => {
+    const url = document.getElementById('srv-url').value.trim()
+    if(!url){ document.getElementById('srv-err').textContent='Enter a URL'; return }
+    localStorage.setItem('mp_server_url', url)
+    div.style.display='none'
+    mpConnect(url)
   }
+  document.getElementById('srv-url').addEventListener('keydown', e => {
+    if(e.key==='Enter') document.getElementById('srv-connect').click()
+  })
 })
 
 // ── INPUT ────────────────────────────────────────────────────
 document.addEventListener('keydown',e=>{keys[e.code]=true})
 document.addEventListener('keyup',  e=>{keys[e.code]=false})
+let mouseX=0, mouseY=0
 canvas.addEventListener('mousemove',e=>{
+  mouseX=e.clientX; mouseY=e.clientY
   // Guest controls enemy (Outlaw), everyone else controls player (Billy)
   let target = (mp.connected && mp.role === 'guest') ? enemy : player
   if(!target) return
@@ -1528,7 +1567,23 @@ function loop(now){
 
   if(isSlowmo){ctx.strokeStyle='rgba(0,220,255,0.25)';ctx.lineWidth=8;ctx.strokeRect(4,4,W-8,H-8)}
   drawHUD()
-  requestAnimationFrame(loop)
+  // custom crosshair
+  if(mouseX||mouseY){
+    let cx=mouseX,cy=mouseY,r=12,gap=4,len=8
+    ctx.save()
+    ctx.strokeStyle='rgba(255,255,255,0.9)';ctx.lineWidth=1.5
+    ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.stroke()
+    ctx.beginPath()
+    ctx.moveTo(cx,cy-r-len);ctx.lineTo(cx,cy-r-gap)
+    ctx.moveTo(cx,cy+r+gap);ctx.lineTo(cx,cy+r+len)
+    ctx.moveTo(cx-r-len,cy);ctx.lineTo(cx-r-gap,cy)
+    ctx.moveTo(cx+r+gap,cy);ctx.lineTo(cx+r+len,cy)
+    ctx.stroke()
+    ctx.fillStyle='rgba(255,255,255,0.9)'
+    ctx.beginPath();ctx.arc(cx,cy,1.5,0,Math.PI*2);ctx.fill()
+    ctx.restore()
+  }
+  window._loopId = requestAnimationFrame(loop)
 }
 
 // ── START LEVEL ──────────────────────────────────────────────
@@ -1589,8 +1644,9 @@ function startGame(level, isRetry=false, skipNetSync=false){
     if (mp.role === 'guest') mpStartSendingInputs()
   }
 
+  if(window._loopId) cancelAnimationFrame(window._loopId)
   lastTime=performance.now()
-  requestAnimationFrame(loop)
+  window._loopId = requestAnimationFrame(loop)
 }
 
 function restartLevel(){
