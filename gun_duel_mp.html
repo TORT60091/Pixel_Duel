@@ -1586,11 +1586,17 @@ function loop(now){
   // ragdoll physics — run on both host and guest locally
   if(player&&player.dead) player.updateRagdoll(dt)
   if(enemy &&enemy.dead)  enemy.updateRagdoll(dt)
+
+  // blood stains on ground and surfaces — drawn BEFORE characters
+  drawBloodStains()
+
   enemy.draw();player.draw()
+
+  // blood drops still in flight — drawn AFTER characters so they visually arc over them
+  bloodDrops=bloodDrops.filter(b=>{b.update(dt);if(!b.settled){b.draw();return true}return false})
+
   if(slowmoGlowAlpha>0) for(let b of bullets) b.drawSlowmoHalo()
   for(let b of bullets)b.draw()
-  drawBloodStains()
-  bloodDrops=bloodDrops.filter(b=>{b.update(dt);if(!b.settled){b.draw();return true}return false})
 
   if(isSlowmo){ctx.strokeStyle='rgba(0,220,255,0.25)';ctx.lineWidth=8;ctx.strokeRect(4,4,W-8,H-8)}
   drawHUD()
