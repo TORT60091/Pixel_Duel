@@ -519,7 +519,7 @@ class Player{
     this.walkFrame=0;this.walkTimer=0;this.moving=false
     this.reloading=false;this.reloadTimer=0
     this.P=palette
-    this.hasHat=true
+    this.hats=[palette]  // array of hat palettes worn, bottom first; [] = bareheaded
     this.hairStyle=Math.floor(seededRand()*15)  // 0–14
     // ragdoll
     this.dead=false; this.deadVy=0; this.deadAngle=0; this.deadSpin=0
@@ -536,17 +536,21 @@ class Player{
       ctx.translate(-w/2, -this.h/2)
       px=0; py=0
     }
-    // ── COWBOY HAT or HAIRSTYLE ────────────────────────────────
-    if(this.hasHat){
-      ctx.fillStyle=P.hat
-      ctx.fillRect(px+8,  py-14, w-16, 16)
-      ctx.fillRect(px+2,  py,    w-4,  5)
-      ctx.fillRect(px,    py-2,  4,    4)
-      ctx.fillRect(px+w-4,py-2,  4,    4)
-      ctx.fillRect(px-2,  py-4,  4,    4)
-      ctx.fillRect(px+w-2,py-4,  4,    4)
-      ctx.fillStyle=P.hatband
-      ctx.fillRect(px+8, py-2, w-16, 3)
+    // ── COWBOY HAT(S) or HAIRSTYLE ────────────────────────────────
+    if(this.hats && this.hats.length>0){
+      for(let hi=0;hi<this.hats.length;hi++){
+        let HP=this.hats[hi]
+        let oy=hi*(-5)  // each extra hat shifts 5px up
+        ctx.fillStyle=HP.hat
+        ctx.fillRect(px+8,  py-14+oy, w-16, 16)
+        ctx.fillRect(px+2,  py+oy,    w-4,  5)
+        ctx.fillRect(px,    py-2+oy,  4,    4)
+        ctx.fillRect(px+w-4,py-2+oy,  4,    4)
+        ctx.fillRect(px-2,  py-4+oy,  4,    4)
+        ctx.fillRect(px+w-2,py-4+oy,  4,    4)
+        ctx.fillStyle=HP.hatband
+        ctx.fillRect(px+8, py-2+oy, w-16, 3)
+      }
     } else {
       // Head top is at py+5. Hair grows upward from there.
       let hs=this.hairStyle
@@ -1041,13 +1045,13 @@ function mpSendState() {
     W, H,
     p:  { x:player.x, y:player.y, vy:player.vy, angle:player.angle, facing:player.facing,
           lives:player.lives, ammo:player.ammo, reloading:player.reloading, reloadTimer:player.reloadTimer,
-          hasHat:player.hasHat, dead:player.dead, deadAngle:player.deadAngle, invincible:player.invincible,
+          hats:player.hats, dead:player.dead, deadAngle:player.deadAngle, invincible:player.invincible,
           moving:player.moving, walkFrame:player.walkFrame,
           deadVy:player.deadVy, deadBounced:player.deadBounced, deadDriftX:player.deadDriftX, deadTargetAngle:player.deadTargetAngle,
           hairStyle:player.hairStyle, P:player.P },
     e:  { x:enemy.x,  y:enemy.y,  vy:enemy.vy,  angle:enemy.angle,  facing:enemy.facing,
           lives:enemy.lives,  ammo:enemy.ammo,  reloading:enemy.reloading, reloadTimer:enemy.reloadTimer,
-          hasHat:enemy.hasHat, dead:enemy.dead, deadAngle:enemy.deadAngle, invincible:enemy.invincible,
+          hats:enemy.hats, dead:enemy.dead, deadAngle:enemy.deadAngle, invincible:enemy.invincible,
           moving:enemy.moving, walkFrame:enemy.walkFrame,
           deadVy:enemy.deadVy, deadBounced:enemy.deadBounced, deadDriftX:enemy.deadDriftX, deadTargetAngle:enemy.deadTargetAngle,
           hairStyle:enemy.hairStyle, P:enemy.P },
@@ -1075,13 +1079,18 @@ function mpApplyState(s) {
     if (r.vy !== undefined) r.vy *= sy
     if (r.deadVy !== undefined) r.deadVy *= sy
     if (r.deadDriftX !== undefined) r.deadDriftX *= sx
+    // hats is an array of palette objects — no coordinates, don't scale
+    // keep as-is (already copied by spread)
     return r
   }
 
   // Player (host's character): apply fully, but once dead keep ragdoll local
   let wasPlayerDead = player.dead
   let savedP = wasPlayerDead ? {x:player.x,y:player.y,deadVy:player.deadVy,deadAngle:player.deadAngle,deadBounced:player.deadBounced,deadDriftX:player.deadDriftX} : null
-  Object.assign(player, scalePos(s.p))
+  let scaledP = scalePos(s.p)
+  let incomingHatsP = s.p.hats  // preserve array reference before Object.assign flattens it
+  Object.assign(player, scaledP)
+  if (incomingHatsP !== undefined) player.hats = incomingHatsP  // restore array (not scaled)
   if (wasPlayerDead && player.dead && savedP) {
     player.x=savedP.x; player.y=savedP.y
     player.deadVy=savedP.deadVy; player.deadAngle=savedP.deadAngle
@@ -1092,7 +1101,10 @@ function mpApplyState(s) {
   let localAngle = enemy.angle, localFacing = enemy.facing
   let wasEnemyDead = enemy.dead
   let savedE = wasEnemyDead ? {x:enemy.x,y:enemy.y,deadVy:enemy.deadVy,deadAngle:enemy.deadAngle,deadBounced:enemy.deadBounced,deadDriftX:enemy.deadDriftX} : null
-  Object.assign(enemy, scalePos(s.e))
+  let scaledE = scalePos(s.e)
+  let incomingHatsE = s.e.hats
+  Object.assign(enemy, scaledE)
+  if (incomingHatsE !== undefined) enemy.hats = incomingHatsE  // restore array
   enemy.angle = localAngle
   enemy.facing = localFacing
   if (wasEnemyDead && enemy.dead && savedE) {
@@ -1560,26 +1572,41 @@ function loop(now){
     b.update(dt)
     if(!gameOver){
       // hat hit check — hat zone: above py, roughly crown area
-      if(b.owner!=='player'&&player.hasHat){
+      if(b.owner!=='player'&&player.hats&&player.hats.length>0){
         let hp=player, hx=hp.x, hy=hp.y
         if(b.x>hx&&b.x<hx+hp.w&&b.y>hy-18&&b.y<hy+2){
-          player.hasHat=false
-          flyingHats.push(new FlyingHat(hx,hy-14,player.P,b.dx))
+          let topP=player.hats.pop()
+          flyingHats.push(new FlyingHat(hx,hy-14,topP,b.dx))
           for(let k=0;k<6;k++)particles.push(new Particle(hx+16,hy-8,'spark','#FFD700'))
           return false
         }
       }
-      if(b.owner!=='enemy'&&enemy.hasHat){
+      if(b.owner!=='enemy'&&enemy.hats&&enemy.hats.length>0){
         let hp=enemy, hx=hp.x, hy=hp.y
         if(b.x>hx&&b.x<hx+hp.w&&b.y>hy-18&&b.y<hy+2){
-          enemy.hasHat=false
-          flyingHats.push(new FlyingHat(hx,hy-14,enemy.P,b.dx))
+          let topP=enemy.hats.pop()
+          flyingHats.push(new FlyingHat(hx,hy-14,topP,b.dx))
           for(let k=0;k<6;k++)particles.push(new Particle(hx+16,hy-8,'spark','#cc4444'))
           return false
         }
       }
       if(b.owner!=='player'&&rectHit(b,player)){takeHit(player,true,b.dx);return false}
       if(b.owner!=='enemy' &&rectHit(b,enemy)) {takeHit(enemy,false,b.dx);return false}
+    }
+    return true
+  })
+
+  // hat pickup — player/enemy walks over settled hat
+  flyingHats=flyingHats.filter(h=>{
+    if(!h.onGround) return true
+    for(let p of [player,enemy]){
+      if(p.dead) continue
+      if(p.hats && p.hats.length>=2) continue  // max 2 hats
+      if(Math.abs(p.x+p.w/2 - (h.x+14)) < 30){
+        p.hats.push(h.P)
+        for(let k=0;k<4;k++) particles.push(new Particle(p.x+p.w/2, p.y, 'spark', '#FFD700'))
+        return false  // remove from flyingHats
+      }
     }
     return true
   })
