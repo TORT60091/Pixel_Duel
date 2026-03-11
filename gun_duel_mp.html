@@ -1384,16 +1384,14 @@ function mpSendState() {
           lives:player.lives, ammo:player.ammo, reloading:player.reloading, reloadTimer:player.reloadTimer,
           hats:player.hats, dead:player.dead, deadAngle:player.deadAngle, invincible:player.invincible,
           moving:player.moving, walkFrame:player.walkFrame, crouching:player.crouching,
-          deadVy:player.deadVy, deadBounced:player.deadBounced, deadDriftX:player.deadDriftX, deadTargetAngle:player.deadTargetAngle,
-          hairStyle:player.hairStyle, P:player.P },
+          deadVy:player.deadVy, deadBounced:player.deadBounced, deadDriftX:player.deadDriftX, deadTargetAngle:player.deadTargetAngle },
     e:  { x:enemy.x,  y:enemy.y,  vy:enemy.vy,  angle:enemy.angle,  facing:enemy.facing,
           lives:enemy.lives,  ammo:enemy.ammo,  reloading:enemy.reloading, reloadTimer:enemy.reloadTimer,
           hats:enemy.hats, dead:enemy.dead, deadAngle:enemy.deadAngle, invincible:enemy.invincible,
           moving:enemy.moving, walkFrame:enemy.walkFrame, crouching:enemy.crouching,
-          deadVy:enemy.deadVy, deadBounced:enemy.deadBounced, deadDriftX:enemy.deadDriftX, deadTargetAngle:enemy.deadTargetAngle,
-          hairStyle:enemy.hairStyle, P:enemy.P },
-    bullets: bullets.map(b=>({x:b.x,y:b.y,dx:b.dx,dy:b.dy,owner:b.owner,trail:b.trail.slice(),bounces:b.bounces})),
-    flyingHats: flyingHats.map(h=>({x:h.x,y:h.y,dx:h.dx,dy:h.dy,spin:h.spin,P:h.P,onGround:h.onGround,spinSpeed:h.spinSpeed})),
+          deadVy:enemy.deadVy, deadBounced:enemy.deadBounced, deadDriftX:enemy.deadDriftX, deadTargetAngle:enemy.deadTargetAngle },
+    bullets: bullets.map(b=>({x:b.x,y:b.y,dx:b.dx,dy:b.dy,owner:b.owner,bounces:b.bounces})),
+    flyingHats: flyingHats.map(h=>({x:h.x,y:h.y,dx:h.dx,dy:h.dy,spin:h.spin,onGround:h.onGround,spinSpeed:h.spinSpeed})),
     flyingGuns: flyingGuns.map(g=>({x:g.x,y:g.y,dx:g.dx,dy:g.dy,spin:g.spin,spinSpeed:g.spinSpeed})),
     go: gameOver, ts: timeScale, se: slowEnergy,
     pIsSlowmo, pSlowEnergy,
@@ -1477,14 +1475,15 @@ function mpApplyState(s) {
     bl.trail = (b.trail||[]).map(t=>({x:t.x*sx,y:t.y*sy}))
     bl.bounces = b.bounces || 0
     let prev = prevBullets.find(p => p.owner===b.owner && Math.abs(p.dx/sx-b.dx)<0.01 && Math.abs(p.dy/sy-b.dy)<0.01)
-    if (prev) { bl.pathTrail=prev.pathTrail; bl._pathD=prev._pathD; bl._sinceLastPt=prev._sinceLastPt }
+    if (prev) { bl.trail=prev.trail; bl.pathTrail=prev.pathTrail; bl._pathD=prev._pathD; bl._sinceLastPt=prev._sinceLastPt }
     return bl
   })
 
   // Sync flyingHats
   if (s.flyingHats) {
-    flyingHats = s.flyingHats.map(h => {
-      let fh = new FlyingHat(h.x*sx, h.y*sy, h.P || {}, 0)
+    flyingHats = s.flyingHats.map((h, i) => {
+      let existingP = flyingHats[i]?.P || {}
+      let fh = new FlyingHat(h.x*sx, h.y*sy, existingP, 0)
       fh.dx=h.dx*sx; fh.dy=h.dy*sy; fh.spin=h.spin
       fh.spinSpeed=h.spinSpeed||0; fh.onGround=h.onGround||false
       return fh
