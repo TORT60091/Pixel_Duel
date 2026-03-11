@@ -1541,8 +1541,9 @@ function mpNotifyLevelStart(level) {
   if (mp.role === 'host' && mp.ws?.readyState === 1) {
     mp.ws.send(JSON.stringify({ type: 'start_level', level, seed: mp.currentSeed, roundNum, scoreHost:scorePlayer, scoreGuest:scoreEnemy, slowMode }))
     // Begin sending state snapshots
-    // State snapshots are sent every frame from the game loop
-    if (mp.stateInterval) { clearInterval(mp.stateInterval); mp.stateInterval = null }
+    // Send state snapshots via setInterval (not RAF) — 20fps, independent of render loop
+    if (mp.stateInterval) clearInterval(mp.stateInterval)
+    mp.stateInterval = setInterval(mpSendState, 50)
   }
 }
 
@@ -2209,11 +2210,6 @@ function loop(now){
     return true
   })
   } // end host-only physics block
-
-  // Host: send state ~20fps (every 50ms) to avoid flooding network
-  if (mp.connected && mp.role === 'host'){
-    if(!mp._lastSend || now - mp._lastSend >= 50){ mp._lastSend=now; mpSendState() }
-  }
 
   if (mp.connected && mp.role === 'guest') {
     // already updated in prediction block above — just draw
