@@ -1378,24 +1378,26 @@ function mpSendState() {
     }))
   }
   _lastParticleCount = particles.length
+  // normalise helper — divide by host canvas size so guest can map to its own size
+  const nx = v => v / W
+  const ny = v => v / H
+  const nChar = c => ({
+    x:c.x/W, y:c.y/H, vy:c.vy/H,
+    angle:c.angle, facing:c.facing,
+    lives:c.lives, ammo:c.ammo, reloading:c.reloading, reloadTimer:c.reloadTimer,
+    hats:c.hats, dead:c.dead, deadAngle:c.deadAngle, invincible:c.invincible,
+    moving:c.moving, walkFrame:c.walkFrame, crouching:c.crouching,
+    deadVy:c.deadVy/H, deadBounced:c.deadBounced, deadDriftX:c.deadDriftX/W, deadTargetAngle:c.deadTargetAngle
+  })
   const state = {
-    W, H,
-    p:  { x:player.x, y:player.y, vy:player.vy, angle:player.angle, facing:player.facing,
-          lives:player.lives, ammo:player.ammo, reloading:player.reloading, reloadTimer:player.reloadTimer,
-          hats:player.hats, dead:player.dead, deadAngle:player.deadAngle, invincible:player.invincible,
-          moving:player.moving, walkFrame:player.walkFrame, crouching:player.crouching,
-          deadVy:player.deadVy, deadBounced:player.deadBounced, deadDriftX:player.deadDriftX, deadTargetAngle:player.deadTargetAngle },
-    e:  { x:enemy.x,  y:enemy.y,  vy:enemy.vy,  angle:enemy.angle,  facing:enemy.facing,
-          lives:enemy.lives,  ammo:enemy.ammo,  reloading:enemy.reloading, reloadTimer:enemy.reloadTimer,
-          hats:enemy.hats, dead:enemy.dead, deadAngle:enemy.deadAngle, invincible:enemy.invincible,
-          moving:enemy.moving, walkFrame:enemy.walkFrame, crouching:enemy.crouching,
-          deadVy:enemy.deadVy, deadBounced:enemy.deadBounced, deadDriftX:enemy.deadDriftX, deadTargetAngle:enemy.deadTargetAngle },
-    bullets: bullets.map(b=>({x:b.x,y:b.y,dx:b.dx,dy:b.dy,owner:b.owner,bounces:b.bounces})),
-    flyingHats: flyingHats.map(h=>({x:h.x,y:h.y,dx:h.dx,dy:h.dy,spin:h.spin,onGround:h.onGround,spinSpeed:h.spinSpeed})),
-    flyingGuns: flyingGuns.map(g=>({x:g.x,y:g.y,dx:g.dx,dy:g.dy,spin:g.spin,spinSpeed:g.spinSpeed})),
+    p: nChar(player),
+    e: nChar(enemy),
+    bullets: bullets.map(b=>({x:nx(b.x),y:ny(b.y),dx:nx(b.dx),dy:ny(b.dy),owner:b.owner,bounces:b.bounces})),
+    flyingHats: flyingHats.map(h=>({x:nx(h.x),y:ny(h.y),dx:nx(h.dx),dy:ny(h.dy),spin:h.spin,onGround:h.onGround,spinSpeed:h.spinSpeed})),
+    flyingGuns: flyingGuns.map(g=>({x:nx(g.x),y:ny(g.y),dx:nx(g.dx),dy:ny(g.dy),spin:g.spin,spinSpeed:g.spinSpeed})),
     go: gameOver, ts: timeScale, se: slowEnergy,
     pIsSlowmo, pSlowEnergy,
-    particles: newParticles
+    particles: newParticles.map(p=>({x:nx(p.x),y:ny(p.y),dx:nx(p.dx),dy:ny(p.dy),life:p.life,size:p.size,color:p.color,type:p.type}))
   }
   mp.ws.send(JSON.stringify({ type:'state', state }))
 }
@@ -1403,30 +1405,22 @@ function mpSendState() {
 function mpApplyState(s) {
   if (!player || !enemy) return
 
-  // Scale factors: map host coordinate space to guest coordinate space
-  const sx = s.W ? W / s.W : 1
-  const sy = s.H ? H / s.H : 1
-
-  function scalePos(o) {
-    if (!o) return o
-    let r = {...o}
-    if (r.x !== undefined) r.x *= sx
-    if (r.y !== undefined) r.y *= sy
-    if (r.vy !== undefined) r.vy *= sy
-    if (r.deadVy !== undefined) r.deadVy *= sy
-    if (r.deadDriftX !== undefined) r.deadDriftX *= sx
-    // hats is an array of palette objects — no coordinates, don't scale
-    // keep as-is (already copied by spread)
-    return r
-  }
+  // denormalise helper — incoming coords are 0..1, map to local canvas size
+  const dx = v => v * W
+  const dy = v => v * H
+  const dnChar = c => ({
+    ...c,
+    x: dx(c.x), y: dy(c.y), vy: dy(c.vy),
+    deadVy: dy(c.deadVy||0), deadDriftX: dx(c.deadDriftX||0)
+  })
 
   // Player (host's character): apply fully, but once dead keep ragdoll local
   let wasPlayerDead = player.dead
   let savedP = wasPlayerDead ? {x:player.x,y:player.y,deadVy:player.deadVy,deadAngle:player.deadAngle,deadBounced:player.deadBounced,deadDriftX:player.deadDriftX} : null
-  let scaledP = scalePos(s.p)
-  let incomingHatsP = s.p.hats  // preserve array reference before Object.assign flattens it
+  let scaledP = dnChar(s.p)
+  let incomingHatsP = s.p.hats
   Object.assign(player, scaledP)
-  if (incomingHatsP !== undefined) player.hats = incomingHatsP  // restore array (not scaled)
+  if (incomingHatsP !== undefined) player.hats = incomingHatsP
   if (wasPlayerDead && player.dead && savedP) {
     player.x=savedP.x; player.y=savedP.y
     player.deadVy=savedP.deadVy; player.deadAngle=savedP.deadAngle
@@ -1437,13 +1431,13 @@ function mpApplyState(s) {
   let localAngle = enemy.angle, localFacing = enemy.facing, localCrouching = enemy.crouching
   let wasEnemyDead = enemy.dead
   let savedE = wasEnemyDead ? {x:enemy.x,y:enemy.y,deadVy:enemy.deadVy,deadAngle:enemy.deadAngle,deadBounced:enemy.deadBounced,deadDriftX:enemy.deadDriftX} : null
-  let scaledE = scalePos(s.e)
+  let scaledE = dnChar(s.e)
   let incomingHatsE = s.e.hats
   Object.assign(enemy, scaledE)
-  if (incomingHatsE !== undefined) enemy.hats = incomingHatsE  // restore array
+  if (incomingHatsE !== undefined) enemy.hats = incomingHatsE
   enemy.angle = localAngle
   enemy.facing = localFacing
-  enemy.crouching = localCrouching  // guest controls their own crouch locally
+  enemy.crouching = localCrouching
   if (wasEnemyDead && enemy.dead && savedE) {
     enemy.x=savedE.x; enemy.y=savedE.y
     enemy.deadVy=savedE.deadVy; enemy.deadAngle=savedE.deadAngle
@@ -1467,14 +1461,13 @@ function mpApplyState(s) {
     eSlowEnergy = slowEnergy
   }
 
-  // Sync bullets — scale coords, preserve pathTrail and bounces
+  // Sync bullets — denorm from 0..1
   let prevBullets = bullets
   bullets = s.bullets.map(b => {
-    let bl = new Bullet(b.x*sx, b.y*sy, 0, b.owner)
-    bl.dx = b.dx*sx; bl.dy = b.dy*sy
-    bl.trail = (b.trail||[]).map(t=>({x:t.x*sx,y:t.y*sy}))
+    let bl = new Bullet(dx(b.x), dy(b.y), 0, b.owner)
+    bl.dx = dx(b.dx); bl.dy = dy(b.dy)
     bl.bounces = b.bounces || 0
-    let prev = prevBullets.find(p => p.owner===b.owner && Math.abs(p.dx/sx-b.dx)<0.01 && Math.abs(p.dy/sy-b.dy)<0.01)
+    let prev = prevBullets.find(p => p.owner===b.owner && Math.abs(p.dx-dx(b.dx))<0.5 && Math.abs(p.dy-dy(b.dy))<0.5)
     if (prev) { bl.trail=prev.trail; bl.pathTrail=prev.pathTrail; bl._pathD=prev._pathD; bl._sinceLastPt=prev._sinceLastPt }
     return bl
   })
@@ -1483,8 +1476,8 @@ function mpApplyState(s) {
   if (s.flyingHats) {
     flyingHats = s.flyingHats.map((h, i) => {
       let existingP = flyingHats[i]?.P || {}
-      let fh = new FlyingHat(h.x*sx, h.y*sy, existingP, 0)
-      fh.dx=h.dx*sx; fh.dy=h.dy*sy; fh.spin=h.spin
+      let fh = new FlyingHat(dx(h.x), dy(h.y), existingP, 0)
+      fh.dx=dx(h.dx); fh.dy=dy(h.dy); fh.spin=h.spin
       fh.spinSpeed=h.spinSpeed||0; fh.onGround=h.onGround||false
       return fh
     })
@@ -1493,17 +1486,17 @@ function mpApplyState(s) {
   // Sync flyingGuns
   if (s.flyingGuns) {
     flyingGuns = s.flyingGuns.map(g => {
-      let fg = new FlyingGun(g.x*sx, g.y*sy, 1)
-      fg.dx=g.dx*sx||0; fg.dy=g.dy*sy||0; fg.spin=g.spin||0; fg.spinSpeed=g.spinSpeed||0
+      let fg = new FlyingGun(dx(g.x), dy(g.y), 1)
+      fg.dx=dx(g.dx)||0; fg.dy=dy(g.dy)||0; fg.spin=g.spin||0; fg.spinSpeed=g.spinSpeed||0
       return fg
     })
   }
 
-  // Sync new particles from host — scale positions
+  // Sync new particles from host
   if (s.particles) {
     for (let sp of s.particles) {
-      let p = new Particle(sp.x*sx, sp.y*sy, sp.type || 'spark', sp.color)
-      p.dx = sp.dx*sx; p.dy = sp.dy*sy; p.life = sp.life; p.size = sp.size
+      let p = new Particle(dx(sp.x), dy(sp.y), sp.type || 'spark', sp.color)
+      p.dx = dx(sp.dx); p.dy = dy(sp.dy); p.life = sp.life; p.size = sp.size
       particles.push(p)
     }
   }
@@ -2196,8 +2189,10 @@ function loop(now){
   })
   } // end host-only physics block
 
-  // Host: send state every frame for minimal latency
-  if (mp.connected && mp.role === 'host') mpSendState()
+  // Host: send state ~20fps (every 50ms) to avoid flooding network
+  if (mp.connected && mp.role === 'host'){
+    if(!mp._lastSend || now - mp._lastSend >= 50){ mp._lastSend=now; mpSendState() }
+  }
 
   if (mp.connected && mp.role === 'guest') {
     // already updated in prediction block above — just draw
